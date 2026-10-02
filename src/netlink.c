@@ -292,8 +292,15 @@ int netlink_init(void)
 
 	rc = genl_register_family(&kaux_family);
 
-	pr_info("uidfake: netlink family '%s' register rc=%d\n",
-		KAUX_FAMILY_NAME, rc);
+	if (rc)
+		pr_err("uidfake: cannot register the netlink family '%s' (%d); the tool will not find this module%s\n",
+		       KAUX_FAMILY_NAME, rc,
+		       rc == -EEXIST ?
+			       " -- a previous copy of it may still be loaded" :
+			       "");
+	else
+		pr_info("uidfake: netlink family '%s' registered, version %u\n",
+			KAUX_FAMILY_NAME, KAUX_FAMILY_VERSION);
 	return rc;
 }
 

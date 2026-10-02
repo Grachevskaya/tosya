@@ -43,6 +43,14 @@
   the inline path wrote the bare function name into the LSM field, so a device could not tell the
   inline hook from the LSM hook it replaced.
 
+- The netlink family is `hma_uidfake`, not the generic `kaux`, and the family version is 4. Generic
+  netlink families share one namespace and the tool resolves its family by name, so a generic name
+  taken by another module would have left this one without a family of its own and pointed the tool at
+  that other module. The version moved from 3 because the status structure changed size when the
+  mechanism names replaced the LSM fields; a helper and a module of different versions cannot read
+  each other's command ids, and the tool checks the status's magic, size and version before it
+  believes anything in it.
+
 - What that costs is measured rather than asserted. The answer never steers a branch: the two choices
   are `csel`s, and a hidden lookup and an *unhidden* lookup in the same bucket execute the same code
   with identical counts -- instruction count, data reads and writes, L1 misses and branch outcomes,

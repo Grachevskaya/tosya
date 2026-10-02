@@ -306,8 +306,15 @@ std::optional<kaux_status> NetlinkClient::status() {
                     sizeof(st));
         if (st.magic != KAUX_STATUS_MAGIC || st.size != sizeof(st) ||
             st.version != KAUX_FAMILY_VERSION) {
-          Log::warn("status does not look like ours (magic {:x}, size {})",
-                    st.magic, st.size);
+          Log::warn(
+              /* No release number in here: the protocol version is what has to
+               * match, and saying which one this tool speaks is enough for a
+               * reader to act on. */
+              "status does not look like ours (magic {:x}, size {}, version "
+              "{}); this tool "
+              "speaks version {}, so module and tool have to come from the "
+              "same build",
+              st.magic, st.size, st.version, KAUX_FAMILY_VERSION);
           return std::nullopt;
         }
         return st;

@@ -268,9 +268,13 @@ the running kernel's config (`/proc/config.gz`).
 ## Protocol
 
 Little endian, defined once in `include/kaux.h`, which the module and the tool both include. The
-family version is 3 and the kernel rejects a request that does not carry it, so a helper and a
-module of different versions cannot read each other's command ids. Version 3 has not been published
-before 0.3.0, so it is the layout as it stands.
+family is named after the module, `hma_uidfake`, because generic netlink families share one
+namespace: a generic name could be taken by another module, and the tool resolves the family by name,
+so it would then be talking to that module. The family version is 4 and the kernel rejects a request
+that does not carry it, so a helper and a module of different versions cannot read each other's
+command ids. It was 3 through 0.3.x; 4 renamed the family and put one mechanism name per family in
+the status, which changed the structure's size, and the tool checks the status's magic, size and
+version before it believes anything in it.
 
 ```
 KAUX_CMD_PING         (1)  no payload, ACK only
