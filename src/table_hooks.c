@@ -1,17 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * table_hooks.c - the mechanisms that answer from a syscall table.
- *
- * Both questions can be answered by replacing entries in sys_call_table and its
- * 32-bit twin: the four uid queries (getpriority, setpriority, ioprio_get,
- * ioprio_set) and the six id setters. This is what a kernel falls back to when
- * a function cannot be copied, and it is the same work KernelSU does.
- *
- * The table plumbing lives here too, because there is one way to do it: find an
- * entry by number without trusting the table's address, and write it through the
- * kernel's own fixmap, keeping a verbatim copy of what was there so the write can
- * prove it worked and the unload can put it back.
- */
 #include <linux/cred.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -48,12 +35,6 @@ struct uidfake_args {
 #define UF_TABLE_SCAN \
 	512 /* the largest arm64 table, 64-bit or 32-bit, is ~450 */
 
-/*
- * One pair per mechanism, not one pair for the file: the two table mechanisms are
- * reverted in the order the families are (the uid queries first), and a mechanism
- * that could not find its own table would leave entries pointing into a module
- * that is leaving.
- */
 static uidfake_syscall_t *g_uid_table;
 static uidfake_syscall_t *g_uid_ctable;
 static uidfake_syscall_t *g_set_table;
@@ -87,12 +68,6 @@ struct hook_entry { // NOLINT(clang-analyzer-optin.performance.Padding)
 	/* the 64-bit sibling of a fallback entry, when native is -1 */
 	struct hook_entry *ally;
 };
-/*
- * The tables themselves are defined further down, next to the hooks they point
- * at; find_slot below names them, so they are declared here. A tentative
- * definition of an array of unknown size is what lets a later one carry the
- * initialiser.
- */
 static struct hook_entry g_hook[];
 static struct hook_entry g_set[];
 #ifdef CONFIG_COMPAT
@@ -452,7 +427,6 @@ static int uid_tables_install(void)
 			(void *)table, (void *)uidfake_lookup("find_user"),
 			(void *)find_user);
 
-	uidfake_status_add_flags(KAUX_F_PRIO_TABLES);
 	uidfake_status_set_hooks_expected(ARRAY_SIZE(g_hook),
 #ifdef CONFIG_COMPAT
 					  ARRAY_SIZE(g_chook)
@@ -537,7 +511,6 @@ static int setuid_tables_install(void)
 #endif
 	);
 	uidfake_status_add_hooks(n, c);
-	uidfake_status_set_lsm(KAUX_LSM_FALLBACK, 0, "syscall setters");
 	return 0;
 }
 static void setuid_tables_remove(void)

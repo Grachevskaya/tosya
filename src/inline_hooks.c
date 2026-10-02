@@ -337,7 +337,6 @@ static int setuid_inline_install(void)
 		uidfake_status_note(rc);
 		return rc;
 	}
-	uidfake_status_set_lsm(KAUX_LSM_TAKEN, 0, g_setuid.name);
 	return 0;
 }
 
@@ -347,7 +346,6 @@ static int uid_inline_install(void)
 
 	if (!rc) {
 		uidfake_status_set_hooks_expected(0, 0);
-		uidfake_status_add_flags(KAUX_F_PRIO_INLINE);
 	}
 	return rc;
 }

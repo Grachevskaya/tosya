@@ -46,13 +46,16 @@ constexpr std::size_t kApkLimit = 10000;
    * is hooked". So the tier is what gets printed, and the counts only where
    * they mean something.
    */
-  if (st->flags & KAUX_F_PRIO_INLINE)
-    line += ", uid queries=find_user";
-  else if (st->flags & KAUX_F_PRIO_TABLES)
-    line += ", uid queries=syscall tables, uid " + std::to_string(st->native) +
-            "+" + std::to_string(st->compat);
+  /* Which mechanism answers the uid queries, by the name the registry gave it:
+   * the module writes the winner in, and an empty field means nothing was
+   * installed. */
+  if (st->uid_tier[0])
+    line += std::string(", uid queries=") + st->uid_tier;
   else
-    line += ", uid queries=not hidden";
+    line += ", uid queries=not answered";
+  if (st->native + st->compat)
+    line += ", uid " + std::to_string(st->native) + "+" +
+            std::to_string(st->compat) + " in the tables";
   if (st->last_error)
     line += ", err=" + std::to_string(st->last_error);
   if (st->apk_inodes || st->apk_offered)
@@ -77,13 +80,10 @@ constexpr std::size_t kApkLimit = 10000;
       line += ", page size is not the module's";
   }
 
-  if (st->lsm_state == KAUX_LSM_TAKEN || st->lsm_state == KAUX_LSM_FALLBACK)
-    line +=
-        std::string(", setuid=") + (st->lsm_target[0] ? st->lsm_target : "?");
-  else if (st->lsm_state == KAUX_LSM_FAILED)
-    line += ", setuid hook failed (" + std::to_string(st->lsm_error) + ")";
+  if (st->setuid_tier[0])
+    line += std::string(", setuid=") + st->setuid_tier;
   else
-    line += ", setuid hook not installed";
+    line += ", setuid=not watched";
   return line;
 }
 

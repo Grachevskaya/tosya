@@ -24,6 +24,8 @@
 #include <linux/slab.h>
 #include <linux/version.h>
 
+#include <linux/string.h>
+
 #include "uidfake.h"
 #include "kaux.h"
 #include "tier.h"
@@ -270,9 +272,17 @@ int uidfake_lsm_install(void)
 {
 	const int ret = uf_lsm_install();
 
-	uidfake_status_set_lsm(ret ? KAUX_LSM_FAILED : KAUX_LSM_TAKEN,
-			       ret ? ret : 0, ret ? NULL : g_target_name);
-	return ret;
+	char name[32];
+
+	if (ret) {
+		uidfake_status_note(ret);
+		return ret;
+	}
+	strscpy(name, "lsm: ", sizeof(name));
+	strlcat(name, g_target_name ? g_target_name : "chain head",
+		sizeof(name));
+	uidfake_status_set_setuid_tier(name);
+	return 0;
 }
 
 #else /* >= 6.12: every hook sits behind its own static call */
@@ -482,10 +492,16 @@ int uidfake_lsm_install(void)
 {
 	const int ret = uf_lsm_install();
 
-	uidfake_status_set_lsm(ret ? KAUX_LSM_FAILED : KAUX_LSM_TAKEN,
-			       ret ? ret : 0,
-			       ret ? NULL : "cap_task_fix_setuid");
-	return ret;
+	char name[32];
+
+	if (ret) {
+		uidfake_status_note(ret);
+		return ret;
+	}
+	strscpy(name, "lsm: ", sizeof(name));
+	strlcat(name, "cap_task_fix_setuid", sizeof(name));
+	uidfake_status_set_setuid_tier(name);
+	return 0;
 }
 
 #endif /* LINUX_VERSION_CODE < 6.12 */

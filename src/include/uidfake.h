@@ -119,22 +119,16 @@ u32 policy_lookup_as(uid_t caller, uid_t target);
 
 u32 uidfake_tag_app(void); /* app id + 1, or 0 when untagged */
 
-/* The name a waiting child gets from the apk it opened, and the end of its window. */
 void uidfake_tag_name(u32 app);
 void uidfake_tag_close(void);
 bool uidfake_tag_pending_here(void);
 
-/*
- * The gate the hooks ask: does @target get hidden from whoever is calling? 0 when
- * it does not, or when the caller is not an app with rules of its own.
- */
 struct pt_regs;
 
 typedef long (*uidfake_syscall_t)(const struct pt_regs *);
 
 u32 policy_query(uid_t target);
 
-/* The status the mechanisms fill in (status.c). */
 void uidfake_status_add_flags(unsigned int flags);
 void uidfake_status_set_hooks_expected(unsigned int native,
 				       unsigned int compat);
@@ -193,7 +187,8 @@ void uidfake_lsm_remove(void);
 struct kaux_status;
 void uidfake_status_get(struct kaux_status *out);
 void uidfake_status_set_hooks(unsigned int native, unsigned int compat);
-void uidfake_status_set_lsm(int state, int error, const char *target);
+void uidfake_status_set_uid_tier(const char *name);
+void uidfake_status_set_setuid_tier(const char *name);
 void uidfake_status_set_apks(unsigned int inodes, unsigned int expected,
 			     unsigned int failed);
 void uidfake_status_note(int error);

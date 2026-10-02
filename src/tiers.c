@@ -1,10 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * tiers.c - walk a family of mechanisms in order, and remember what won.
- *
- * The mechanisms themselves are defined in the files named after them (see
- * tier.h for why the table below is explicit); this is the table and the walk.
- */
 #include <linux/kernel.h>
 #include <linux/module.h>
 #ifdef UIDFAKE_HOST_TEST
@@ -16,7 +10,6 @@
 #include "uidfake.h"
 #include "tier.h"
 
-/* One line per mechanism, in no particular order: the order field decides. */
 extern const struct uf_tier uf_tier_uid_inline;
 extern const struct uf_tier uf_tier_uid_tables;
 extern const struct uf_tier uf_tier_setuid_inline;
@@ -24,11 +17,6 @@ extern const struct uf_tier uf_tier_setuid_lsm;
 extern const struct uf_tier uf_tier_setuid_setters;
 
 #ifdef UIDFAKE_HOST_TEST
-/*
- * The host test supplies its own mechanisms. The kernel's table is fixed, so
- * this is compiled in only for the test, and the two accessors below are the
- * only place the choice shows.
- */
 static const struct uf_tier *const *g_test_tiers;
 static unsigned int g_test_tiers_n;
 
@@ -45,7 +33,6 @@ static const struct uf_tier *const g_tiers[] = {
 	&uf_tier_setuid_lsm, &uf_tier_setuid_setters,
 };
 #else
-/* empty: the host test always sets its own table with uf_tier_set_table() */
 static const struct uf_tier *const g_tiers[] = { NULL };
 #endif
 
@@ -91,10 +78,6 @@ int uf_tier_install(const char *family, const char *force)
 
 	g_tried_n = 0;
 	if (forced) {
-		/*
-		 * One mechanism, named: a forced run has to show that one's answer,
-		 * including a failure, and not quietly fall through to another.
-		 */
 		for (i = 0; i < tier_count(); i++) {
 			int rc;
 

@@ -49,6 +49,7 @@ int hooks_install(void)
 	 * the native and compat callers.
 	 */
 	uid = uf_tier_install(UF_TIER_UID, uf_uid_tier);
+	uidfake_status_set_uid_tier(uf_tier_name(UF_TIER_UID));
 	if (uid)
 		pr_err("uidfake: no mechanism on this kernel can answer the uid queries\n");
 	else
@@ -61,9 +62,10 @@ int hooks_install(void)
 	 * loudly.
 	 */
 	setuid = uf_tier_install(UF_TIER_SETUID, uf_setuid_tier);
+	uidfake_status_set_setuid_tier(uf_tier_name(UF_TIER_SETUID));
 	if (setuid) {
 		pr_err("uidfake: identity changes are NOT watched on this kernel\n");
-		uidfake_status_set_lsm(KAUX_LSM_FAILED, -ENODEV, "");
+		uidfake_status_note(-ENODEV);
 	} else {
 		pr_info("uidfake: id changes are watched by %s\n",
 			uf_tier_name(UF_TIER_SETUID));

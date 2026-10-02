@@ -86,8 +86,6 @@ struct kaux_status {
 	unsigned int apk_offered;
 	unsigned int apk_failed; /* of the last apply */
 	unsigned int apk_failed_total; /* since the module was loaded */
-	int lsm_state; /* KAUX_LSM_* */
-	int lsm_error; /* errno, when lsm_state is KAUX_LSM_FAILED */
 	int last_error; /* the most recent failure, 0 when there is none */
 	unsigned int apk_updates; /* how many times the apk set was applied */
 	/*
@@ -99,7 +97,17 @@ struct kaux_status {
 	 */
 	unsigned int va_bits;
 	unsigned int page_shift;
-	char lsm_target[32]; /* the implementation the hook was taken from */
+	/*
+	 * Which mechanism is in place for each of the two questions, under the name the
+	 * registry gives it: "inline find_user" or "syscall tables" for the uid queries,
+	 * "inline cap_task_fix_setuid", "lsm: cap_task_fix_setuid" or "syscall setters"
+	 * for the identity change. Empty means nothing is installed there, which is the
+	 * thing a user has to be able to tell apart -- the inline path used to report the
+	 * same string as the mechanism behind it, so a status line could not say whether
+	 * the inline hook or the LSM hook was doing the work.
+	 */
+	char uid_tier[32];
+	char setuid_tier[32];
 };
 #define KAUX_STATUS_MAGIC 0x7875616bu /* "kaux" */
 
@@ -107,18 +115,12 @@ struct kaux_status {
 #define KAUX_F_COMPAT 0x2u
 #define KAUX_F_SETUID 0x4u
 #define KAUX_F_APKS 0x8u /* the last apk apply put every entry in place */
-/* How the uid queries are answered: from a copy of find_user (one inline hook,
- * nothing in the syscall tables), or from the syscall tables. Neither set means
- * the queries are not answered at all. */
-#define KAUX_F_PRIO_INLINE 0x10u
-#define KAUX_F_PRIO_TABLES 0x20u
+/*
+ * The two questions are answered by the mechanisms named in uid_tier and setuid_tier;
+ * KAUX_F_SETUID says whether an identity change is watched at all.
+ */
 
-#define KAUX_LSM_NONE 0
-#define KAUX_LSM_TAKEN 1
-#define KAUX_LSM_FAILED 2
-#define KAUX_LSM_FALLBACK 3
-
-KAUX_STATIC_ASSERT(sizeof(struct kaux_status) == 104,
+KAUX_STATIC_ASSERT(sizeof(struct kaux_status) == 128,
 		   "kaux_status is the wire image");
 KAUX_STATIC_ASSERT(sizeof(struct kaux_begin) == 12,
 		   "kaux_begin is the wire image");

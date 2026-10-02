@@ -1,11 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * status.c - what the module tells userspace about itself.
- *
- * One struct, filled in by whichever mechanism ends up in place and read out
- * over netlink (KAUX_CMD_STATUS). Fixed size with a magic, so a mismatch
- * between the two ends is a checked error and not a misread (include/kaux.h).
- */
 #include <linux/cred.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -44,16 +37,27 @@ void uidfake_status_set_hooks(unsigned int native, unsigned int compat)
 	if (compat == g_status.compat_expected)
 		g_status.flags |= KAUX_F_COMPAT;
 }
-void uidfake_status_set_lsm(int state, int error, const char *target)
+static void set_name(char *dst, size_t len, const char *src)
 {
-	g_status.lsm_state = state;
-	g_status.lsm_error = error;
-	if (state == KAUX_LSM_TAKEN || state == KAUX_LSM_FALLBACK)
-		g_status.flags |= KAUX_F_SETUID;
-	if (target)
-		strscpy(g_status.lsm_target, target,
-			sizeof(g_status.lsm_target));
+	if (src && *src) {
+		strscpy(dst, src, len);
+		return;
+	}
+	dst[0] = '\0';
 }
+
+void uidfake_status_set_uid_tier(const char *name)
+{
+	set_name(g_status.uid_tier, sizeof(g_status.uid_tier), name);
+}
+
+void uidfake_status_set_setuid_tier(const char *name)
+{
+	set_name(g_status.setuid_tier, sizeof(g_status.setuid_tier), name);
+	if (name && *name)
+		g_status.flags |= KAUX_F_SETUID;
+}
+
 void uidfake_status_set_apks(unsigned int inodes, unsigned int expected,
 			     unsigned int failed)
 {
@@ -74,11 +78,6 @@ void uidfake_status_note(int error)
 {
 	g_status.last_error = error;
 }
-/*
- * The three a mechanism needs, since the struct itself is private to this file:
- * which one is in place, how many entries it expects to have hooked, and how
- * many it has just hooked.
- */
 void uidfake_status_add_flags(unsigned int flags)
 {
 	g_status.flags |= flags;

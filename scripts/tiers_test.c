@@ -1,15 +1,3 @@
-/*
- * Host test for the tier framework: which mechanism a family picks, what a forced
- * run does, and what a revert takes back.
- *
- * The runner is the real src/tiers.c, compiled against the shims with its table
- * replaced by fakes that record what was called (uf_tier_set_table is compiled in
- * only for the host). The cases are about the framework, not about any mechanism:
- * order, family isolation, forcing (which tries only what it names), and that a
- * revert takes back everything that was installed -- the order that keeps a
- * mechanism from being left behind when two families share a piece of state, which
- * is how the table mechanisms used to be able to leave six entries patched.
- */
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #endif
@@ -51,7 +39,6 @@ static void want_log(const char *expect)
 	want(strcmp(g_log, expect) == 0, expect);
 }
 
-/* A family with nothing installed has no name; comparing that is not a crash. */
 static void want_name(const char *family, const char *expect)
 {
 	const char *got = uf_tier_name(family);
@@ -68,7 +55,6 @@ static void end_case(const char *name)
 	printf("tiers: %s %s\n", name, g_case_fail ? "FAIL" : "PASS");
 	g_total_fail += g_case_fail;
 	g_case_fail = 0;
-	/* clear after the revert, or the removes it runs land in the next case */
 	uf_tier_revert_all();
 	g_log_n = 0;
 	g_log[0] = 0;
@@ -162,22 +148,18 @@ static void rem_h(void)
 	g_fh.removes++;
 }
 
-/* uid family: a and b fail, c works; g exists for the revert-all case. */
 static const struct uf_tier t_a = { UF_TIER_UID, "a",	 "fake a",
 				    10,		 inst_a, rem_a };
 static const struct uf_tier t_b = { UF_TIER_UID, "b",	 "fake b",
 				    20,		 inst_b, rem_b };
 static const struct uf_tier t_c = { UF_TIER_UID, "c",	 "fake c",
 				    30,		 inst_c, rem_c };
-/* setuid family: d works, e fails, f is the one behind it (a forced run is how
- * the ones behind a working mechanism are reached). */
 static const struct uf_tier t_d = { UF_TIER_SETUID, "d",  "fake d", 10,
 				    inst_d,	    rem_d };
 static const struct uf_tier t_e = { UF_TIER_SETUID, "e",  "fake e", 20,
 				    inst_e,	    rem_e };
 static const struct uf_tier t_f = { UF_TIER_SETUID, "f",  "fake f", 30,
 				    inst_f,	    rem_f };
-/* the revert-all pair: orders past everything else, so they change no other case */
 static const struct uf_tier t_g = { UF_TIER_UID, "g",	 "fake g",
 				    40,		 inst_g, rem_g };
 static const struct uf_tier t_h = { UF_TIER_SETUID, "h",  "fake h", 40,
@@ -220,7 +202,6 @@ int main(void)
 	want_log("abcd");
 	end_case("isolation");
 
-	/* 3. Forced: only the mechanism named by key is tried. */
 	reset_fakes();
 	g_fb.rc = 0; /* b is the one this case asks for, so it has to work */
 	want(uf_tier_install(UF_TIER_UID, "b") == 0, "forced b installs");
@@ -228,8 +209,6 @@ int main(void)
 	want_name(UF_TIER_UID, "fake b");
 	end_case("forced");
 
-	/* 4. A forced mechanism that fails is reported, not replaced: that is what
-	 *    makes a device run say why the mechanism asked for is not there. */
 	reset_fakes();
 	want(uf_tier_install(UF_TIER_UID, "a") != 0,
 	     "forced failure is returned");
@@ -237,14 +216,12 @@ int main(void)
 	want_name(UF_TIER_UID, NULL);
 	end_case("forced-failure");
 
-	/* 5. A key no mechanism has is refused without calling anything. */
 	reset_fakes();
 	want(uf_tier_install(UF_TIER_UID, "nope") != 0, "unknown key refused");
 	want_log("");
 	want_name(UF_TIER_UID, NULL);
 	end_case("forced-unknown");
 
-	/* 5b. A setuid run passes a failing mechanism and lands on the one behind it. */
 	reset_fakes();
 	g_fd.rc = -EOPNOTSUPP;
 	want(uf_tier_install(UF_TIER_SETUID, NULL) == 0, "install");
@@ -252,7 +229,6 @@ int main(void)
 	want_name(UF_TIER_SETUID, "fake f");
 	end_case("fallthrough");
 
-	/* 6. Revert takes back only what one family installed. */
 	reset_fakes();
 	want(uf_tier_install(UF_TIER_UID, NULL) == 0, "install uid");
 	want(uf_tier_install(UF_TIER_SETUID, NULL) == 0, "install setuid");
@@ -267,8 +243,6 @@ int main(void)
 	want(g_fd.removes == 1, "the setuid one came back");
 	end_case("revert");
 
-	/* 7. Everything installed comes back, most recent first -- the order that
-	 *    keeps a mechanism from being left behind when two share state. */
 	reset_fakes();
 	want(uf_tier_install(UF_TIER_UID, "g") == 0, "install g");
 	want(uf_tier_install(UF_TIER_SETUID, "h") == 0, "install h");
