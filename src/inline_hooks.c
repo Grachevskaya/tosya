@@ -1,12 +1,4 @@
 // SPDX-License-Identifier: GPL-2.0
-/*
- * Runtime entry trampolines for find_user and the setuid LSM callback.
- * A single direct B publishes each hook. No syscall table entry is touched by
- * these tiers, and no kernel image profile or permanent probe is needed.
- *
- * Successful publication pins the module until reboot. Restoring an entry is
- * not enough to drain preempted module frames, especially the setuid path.
- */
 #include <linux/cred.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -23,7 +15,6 @@
 #include "tier.h"
 
 #define UF_INLINE_STORAGE_SIZE 16
-#define UF_BTI_C 0xd503245fu
 #define UF_BTI_JC 0xd50324dfu
 #define UF_PACIASP 0xd503233fu
 #define UF_PACIBSP 0xd503237fu
@@ -77,7 +68,7 @@ asm(".pushsection \".text.uf_inline\",\"ax\"\n" UF_ASM_COPY(
 					    "\tautibsp\n",
 					    "uf_setuid_inline_hook") ".popsection\n");
 
-noinline struct user_struct *uf_find_user_hook(kuid_t uid)
+__attribute__((hot)) noinline struct user_struct *uf_find_user_hook(kuid_t uid)
 {
 	const u32 replacement = policy_query((u32)__kuid_val(uid));
 	const u32 query =
@@ -99,8 +90,8 @@ noinline struct user_struct *uf_find_user_hook(kuid_t uid)
 	return real;
 }
 
-noinline int uf_setuid_inline_hook(struct cred *new, const struct cred *old,
-				   int flags)
+__attribute__((hot)) noinline int
+uf_setuid_inline_hook(struct cred *new, const struct cred *old, int flags)
 {
 	const u32 before = (u32)__kuid_val(old->fsuid);
 	const u32 after = (u32)__kuid_val(new->fsuid);
@@ -123,6 +114,8 @@ noinline int uf_setuid_inline_hook(struct cred *new, const struct cred *old,
 struct uf_inline_hook {
 	const char *name;
 	u32 *copy;
+	unsigned long
+		hook; /* the C handler, when the stub would only be a landing pad */
 	unsigned long stub, pacia_stub, pacib_stub;
 	unsigned long site;
 	u32 saved;
@@ -133,6 +126,7 @@ struct uf_inline_hook {
 static struct uf_inline_hook g_find_user = {
 	.name = "find_user",
 	.copy = g_find_user_copy,
+	.hook = (unsigned long)uf_find_user_hook,
 	.stub = (unsigned long)uf_find_user_stub,
 	.pacia_stub = (unsigned long)uf_find_user_pacia_stub,
 	.pacib_stub = (unsigned long)uf_find_user_pacib_stub,
@@ -140,6 +134,7 @@ static struct uf_inline_hook g_find_user = {
 static struct uf_inline_hook g_setuid = {
 	.name = "cap_task_fix_setuid",
 	.copy = g_setuid_copy,
+	.hook = (unsigned long)uf_setuid_inline_hook,
 	.stub = (unsigned long)uf_setuid_stub,
 	.pacia_stub = (unsigned long)uf_setuid_pacia_stub,
 	.pacib_stub = (unsigned long)uf_setuid_pacib_stub,
@@ -196,6 +191,7 @@ static int inline_install(struct uf_inline_hook *hook)
 	 * before a C prologue changes SP or signs its own return address. */
 	if ((source[0] & 0xffffff3fu) == 0xd503241fu) {
 		skip = UF_INLINE_INSN;
+		stub = hook->hook;
 	} else if (source[0] == UF_PACIASP || source[0] == UF_PACIBSP) {
 		skip = UF_INLINE_INSN;
 		stub = source[0] == UF_PACIASP ? hook->pacia_stub :
@@ -210,17 +206,10 @@ static int inline_install(struct uf_inline_hook *hook)
 
 	/* The original may only be directly called and have no BTI of its own.
 	 * The helper can call this copy indirectly, so give it a known landing. */
-	scratch[0] = UF_BTI_C;
 	if (!distant) {
-		rc = uf_inline_trampoline(scratch + 1,
-					  sizeof(scratch) - UF_INLINE_INSN,
-					  source, addr,
-					  (unsigned long)(hook->copy + 1), size,
+		rc = uf_inline_trampoline(scratch, sizeof(scratch), source,
+					  addr, (unsigned long)hook->copy, size,
 					  skip, &written);
-		if (rc != UF_INLINE_OK && rc != UF_INLINE_ERANGE)
-			return inline_errno(rc);
-		distant = rc == UF_INLINE_ERANGE;
-		written += UF_INLINE_INSN;
 	}
 	if (distant) {
 		u32 *entry, *original;

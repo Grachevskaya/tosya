@@ -325,19 +325,9 @@ static noinline long __nocfi patch_copy_nofault(void *dst, const void *src,
 	return ((uf_copy_nofault_t)g_copy_nofault_addr)(dst, src, size);
 }
 
-/*
- * Read kernel text for a diagnostic. It is the same nofault copy the patcher
- * uses, exposed because the debug dump reads a symbol it is about to rewrite:
- * an ordinary load could fault on a page this context may not take.
- */
 static noinline long __nocfi patch_copy_from_nofault(void *dst, const void *src,
 						     size_t size);
 
-/*
- * The first bytes of a symbol this module is about to copy, through the nofault
- * copy. It is what makes a device's own code available for a host test, and what
- * tells a reader which encoding a refusal was about.
- */
 void uidfake_debug_dump(const char *name, unsigned long addr,
 			unsigned long size)
 {
