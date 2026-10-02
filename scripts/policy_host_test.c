@@ -122,6 +122,54 @@ static void check_tag_path(void)
 	fake_current.thread_info.flags = 0;
 }
 
+static void repl_table_check(void)
+{
+	static const u32 widths[] = { 3, 7, 8 };
+	u32 i, t, bad = 0;
+
+	for (t = 0; t < sizeof(widths) / sizeof(widths[0]); t++) {
+		struct uid_hash h = { .bits = (u8)widths[t],
+				      .shift = (u8)(32 - widths[t]),
+				      .multiply = false };
+		u32 seen[256] = { 0 };
+
+		g_hash = h;
+		for (i = 0; i < 4096; i++) {
+			const u32 target = POLICY_APP_ID_MIN + i;
+			const u32 bucket = uid_hash_apply(&h, target);
+			const u32 r = make_replace(target);
+
+			seen[bucket]++;
+			if (r < POLICY_REPL_BASE ||
+			    r >= POLICY_REPL_BASE + POLICY_REPL_MAX)
+				bad++;
+			else if (uid_hash_apply(&h, r) != bucket)
+				bad++;
+		}
+		for (i = 0; i < (1u << widths[t]); i++)
+			if (!seen[i]) { /* a bucket nothing lands in cannot be checked */
+				bad++;
+				break;
+			}
+	}
+
+	g_hash.multiply = true;
+	for (i = 0; i < 64; i++) {
+		const u32 r = make_replace(POLICY_APP_ID_MIN + i * 137u);
+
+		if (r < POLICY_REPL_BASE ||
+		    r >= POLICY_REPL_BASE + POLICY_REPL_MAX)
+			bad++;
+	}
+	g_hash.multiply = false;
+
+	if (bad) {
+		fprintf(stderr, "repl: %u bad entr(ies)\n", bad);
+		g_fail = 1;
+	}
+	printf("%-22s %s\n", "repl: window+bucket", bad ? "FAIL" : "PASS");
+}
+
 int main(void)
 {
 	u32 callers[7] = { 10376, 10377, 10378, 10379, 10380, 10381, 10382 };
@@ -183,6 +231,7 @@ int main(void)
 	check_sweep("two users", huge, hw * 2, hugec, 0, 30000, 30000);
 
 	check_tag_path();
+	repl_table_check();
 
 	printf("%s\n", g_fail ? "FAIL" : "PASS");
 	return g_fail;

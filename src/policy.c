@@ -231,24 +231,10 @@ static bool detect_uid_hash(struct uid_hash *out)
 
 static u32 make_replace(u32 target)
 {
-	u32 want = uid_hash_apply(&g_hash, target);
-	u32 k;
+	const u32 bucket = uid_hash_apply(&g_hash, target);
+	const u32 h = (POLICY_REPL_BASE >> g_hash.bits) + 1u;
 
-	for (k = 0; k < POLICY_REPL_MAX; k++) {
-		u32 cand = POLICY_REPL_BASE + k;
-		struct user_struct *us;
-
-		if (uid_hash_apply(&g_hash, cand) != want)
-			continue;
-		us = find_user(KUIDT_INIT(cand));
-		if (!us)
-			return cand;
-		free_uid(us);
-	}
-
-	pr_warn("uidfake: no same-bucket replacement for %u among %u candidates\n",
-		target, POLICY_REPL_MAX);
-	return POLICY_REPL_BASE;
+	return (h << g_hash.bits) + ((bucket - h) & ((1u << g_hash.bits) - 1u));
 }
 
 struct layout {
@@ -665,6 +651,8 @@ void policy_apply(const u32 *pairs, u32 npairs)
 		pr_info("uidfake: uid hash = %s bits=%u\n",
 			g_hash.multiply ? "hash_32" : "__uidhashfn",
 			g_hash.bits);
+		if (g_hash.multiply)
+			pr_warn("uidfake: this kernel hashes uids in a form this module does not model; targets are still hidden, but a hidden lookup will not share a bucket with an absent uid\n");
 	}
 
 	sort_pairs(tmp, n);

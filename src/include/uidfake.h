@@ -42,8 +42,9 @@
  * x = 0x40000000 than for x = 10500, and that difference is exactly the timing signal
  * between "hidden" and "no such uid" that uidbench measures. 20001..24096 (the window
  * is POLICY_REPL_MAX wide) is not inside any uid range Android hands out -- apps are
- * 10000..19999 per user, isolated children 90000..98999 -- and make_replace() still
- * refuses any candidate find_user() says exists.
+ * 10000..19999 per user, isolated children 90000..98999 -- so make_replace() can take
+ * its candidate arithmetically for the hash the kernel uses (make_replace() in policy.c)
+ * and never has to ask the kernel whether one is free.
  */
 #define POLICY_REPL_BASE 20001u
 #define POLICY_REPL_MAX (1u << POLICY_REPL_BITS)
