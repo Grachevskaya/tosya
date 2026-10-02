@@ -33,6 +33,12 @@ for f in "${text[@]}"; do
   case "$f" in
   *.sh | *.yml | *.yaml | *.prop | *.md | *.txt | *.cmake | CMakeLists.txt | */CMakeLists.txt)
     grep -qP '\t' "$f" && note "$f: contains a tab"
+    case "$f" in
+    *.md)
+      head -1 "$f" | grep -qE '^# ' || note "$f: first line is not a markdown heading"
+      grep -qE '^#+[^ #]' "$f" && note "$f: a heading has no space after its hashes"
+      ;;
+    esac
     ;;
   esac
   grep -qE ' +$' "$f" && note "$f: trailing whitespace"
