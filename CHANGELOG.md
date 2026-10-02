@@ -1,59 +1,81 @@
 # Changelog
 
-## Unreleased
-
-- Replace whole-function inline copies with short runtime entry trampolines that return to the
-  native body. Publish one aligned four-byte branch through the kernel's ARM64 patch helper,
-  preserving leading BTI/PAC handling and synchronizing instruction visibility across CPUs.
-  Allocate private nearby execution pages when direct branches cannot reach; seal them RO/X
-  before publication and retain published code until reboot.
-- Apply UID policy before the native lookup, including misses. Hidden targets normally query an
-  absent replacement UID; release and reject a replacement that becomes live. Match `hash_32`
-  arithmetic by truncating multiplication to 32 bits before extracting the bucket. These changes
-  do not establish equal latency with an absent UID.
-- Preserve concurrent unrelated task flags during identity propagation. Skip initial task tagging
-  when neither hook family installs, and retain tier state while published inline hooks remain live.
-- Clear old policy on an initially empty configuration, handle filtered-empty snapshots, and reserve
-  a full empty mask. Remove a diagnostic dentry read after its path reference is released.
-- Reconcile APK updates by inode across partial application and lost replies. Confirm removals before
-  additions, retry uncertain records, accept direct system-APK paths, and refresh rules after committed
-  package/user database changes. Arm watches before the first synchronization attempt.
-- Prefer installed ksud for boot loading, retaining the bundled loader when ksud is absent. Share
-  KMI builds between CMake and CI and support worktree/source-export packaging.
-
 ## 0.4.0
 
 - Every hook mechanism is its own file, and which one is in place is a registry rather than a chain
   of `if`s. There are two questions -- how a uid with no processes is reported, and where an identity
   change is seen -- and for each one the mechanisms register an order and the runner walks them until
-  one installs. The inline mechanism comes first for both today: the uid queries are answered from a
-  relocated copy of `find_user`, and the id change from a relocated copy of `cap_task_fix_setuid`,
-  which the kernel hands both creds. The LSM hook and the syscall tables are the mechanisms behind
-  them, and the order is data: moving one is a single number. `uidfake.setuid_tier=` and
-  `uidfake.uid_tier=` force one mechanism, which tries only what it names, so a device can show that
-  each of them works on its own.
+  one installs. The inline mechanism comes first for both: the uid queries are answered at
+  `find_user()`, and the id change at `cap_task_fix_setuid()`, which the kernel hands both creds. The
+  LSM hook and the syscall tables are the mechanisms behind them, and the order is data: moving one is
+  a single number. `uidfake.setuid_tier=` and `uidfake.uid_tier=` force one mechanism, which tries
+  only what it names, so a device can show each of them working on its own.
 
-- The copy is built at load time from the function's own bytes, and every operand that leaves the
-  function is rewritten into an absolute form: `adrp` pairs, `bl` targets, and the branch encodings a
-  function uses for itself. An encoding the relocator does not handle is a refusal, never a guess, and
-  a refusal is what the next mechanism is for. The entry patch is twelve bytes of `adrp`/`add`/`br`
-  with no literal pool, and the stub and the copies live in one asm-declared section that is executable
-  and not writable at once -- a C array under a `.text` name is writable and executable at the same
-  time, which a kernel with `STRICT_MODULE_RWX` refuses to load at all (it did, on the first try).
+- The inline mechanism is a short entry trampoline, not a copy of the function. One aligned four-byte
+  branch is published at the live entry -- through a single-word patch that stops the other CPUs, checks
+  the word it is replacing and synchronizes instruction visibility -- and it jumps to a small trampoline
+  built at load time that replays the displaced entry instructions and branches back into the native
+  body. The rest of the function therefore keeps its own address, including its alternatives, exception
+  tables and literals, and the relocator that whole-function copies needed is used only for the one or
+  two displaced instructions, where anything it does not handle is still a refusal rather than a guess.
+  A leading `BTI` or `PAC*SP` is left in place at the live entry and undone by a matching stub before
+  the C handler runs, so the frame's signing stays balanced. When a direct branch cannot reach the
+  trampoline, a private page is allocated near the image to hold a landing veneer, sealed read-only and
+  executable before the entry is published, and a published entry keeps a module reference: a hooked
+  module cannot be unloaded, which is permanent until reboot and what `hooks_remove()` says.
 
-- A hidden uid no longer costs anything a clock can find. The answer is the same object the kernel
-  returns for a uid that has no processes (`NULL`, after giving the reference back), reached by the
-  same code, so the two are interchangeable: `uidbench` measures 0.3 to 0.5 ns of difference, which is
-  below the spread between two uids that do not exist, and the two previous failures it reports -- a
-  branch on the answer, and a replacement uid the kernel takes longer to reject -- are both gone.
+- A hidden uid is answered without asking the kernel a question it does not need. The policy is read
+  first, and a hidden target is looked up as a replacement uid -- one that hashes into the *target's
+  own* bucket, so the lookup walks the same chain the target's own lookup would -- and a replacement
+  that has turned out to live is released and the answer is still `NULL`, never that unrelated user.
+  The replacement is arithmetic, not a table or a search: for the additive hash every supported kernel
+  uses (`__uidhashfn`; all six trees read, and none of them hashes uids with `hash_32`) the low bits of
+  a uid are free, so the value is four instructions inside the reserved window, computed once per target
+  when the policy is injected. A kernel that does hash uids differently is recognised and warned about,
+  and its targets are still hidden -- with a value from the same window, which does not share their
+  bucket. Hiding wins over sharing a bucket; a target is never left visible because a replacement could
+  not be found.
+
+- The status line names the mechanism in place for each of the two questions, by the name the
+  registry gives it (`uid_tier`, `setuid_tier`: "inline find_user", "syscall tables", "inline
+  cap_task_fix_setuid", "lsm: cap_task_fix_setuid", "syscall setters"), and is empty for a family that
+  installed nothing. Before this, the two questions were reported through two different schemes and
+  the inline path wrote the bare function name into the LSM field, so a device could not tell the
+  inline hook from the LSM hook it replaced.
+
+- What that costs is measured rather than asserted. The answer never steers a branch: the two choices
+  are `csel`s, and a hidden lookup and an *unhidden* lookup in the same bucket execute the same code
+  with identical counts -- instruction count, data reads and writes, L1 misses and branch outcomes,
+  taken on the host. Against a uid whose bucket is *empty* the residue is one walk of one entry: six
+  instructions, one extra read, no extra cache line, no extra mispredict. The two failures this module
+  used to have -- a branch on the answer, and a replacement uid the kernel takes longer to reject -- are
+  gone; `uidbench` on a device remains the judge, and `docs/design.md` records what it measures.
 
 - The status line says which mechanism is in place (`uid queries=inline find_user`,
   `setuid=inline cap_task_fix_setuid`) and, when none is, what the last one to fail said (through the
   `last_error` the tool already prints as `err=`).
 
-- The registry is an explicit table, not a linker-collected section: `__start_`/`__stop_` symbols for
-  a module's own section come out undefined on every KMI built here (kbuild with LTO), which would
-  have been a module that does not load at all.
+- The registry is an explicit table, not a linker-collected section: `__start_`/`__stop_` symbols for a
+  module's own section come out undefined on every KMI built here (kbuild with LTO), which would have
+  been a module that does not load at all.
+
+- Identity propagation preserves the task flags it does not own: the tag bits are moved with a
+  compare-and-swap and a recheck, so a `TIF_` bit set by the scheduler or another module in the same
+  word survives. Nothing is tagged at load when neither hook family installs, and the tier state is kept
+  while a published inline hook is live.
+
+- An empty configuration publishes an empty snapshot instead of a policy with no target, a filtered
+  snapshot that ends up empty is handled the same way, and slot zero is a complete empty mask. A
+  diagnostic read of a dentry after its path reference had been released is gone.
+
+- APK updates are reconciled by inode across partial applications and lost replies: removals are
+  confirmed before additions, uncertain records are retried, direct system-APK paths are accepted, and
+  the rules are refreshed after a committed package or user database change. Watches are armed before
+  the first synchronization attempt.
+
+- The boot loader prefers an installed `ksud` and keeps the bundled loader for devices without it; KMI
+  builds are shared between CMake and CI, worktrees and source exports are supported, and normal
+  archives carry module template files only.
 
 - The host test's `sched` shim closes its include guard, which it never did: harmless while every
   translation unit included it once, and two definitions of `current_fsuid` the moment the tag record

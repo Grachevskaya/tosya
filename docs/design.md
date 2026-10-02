@@ -88,12 +88,36 @@ the requested UID or its policy replacement and calls the native lookup through 
 Hidden targets normally take a native miss without first acquiring the hidden user's reference.
 An absent UID also reaches `policy_query`, closing a pending identity window on this path.
 
-Replacement UIDs are selected at policy-apply time from an unassigned range, aiming for the target's
-native hash bucket. For `hash_32`, multiplication is truncated to 32 bits before the high bits are
-extracted, matching the kernel's arithmetic. If a replacement becomes live later, the hook releases
+Replacement UIDs are computed at policy-apply time, one per target, from an unassigned range and
+*into the target's own hash bucket*: for the additive hash every supported kernel uses, the bucket
+inverts in closed form -- a uid's low bits are free, which makes the value four instructions -- so a
+hidden lookup walks exactly the chain the target's own lookup would, with no search and no probe. A
+kernel whose hash is a different form is recognised and warned about rather than modelled, and its
+targets are still hidden from the same window, because hiding wins over sharing a bucket. If a replacement becomes live later, the hook releases
 that unrelated result and returns `NULL`; it never returns the replacement user's object. This guard
 adds work on a collision. Hash detection, bucket contents, cache state, and contention still affect
 latency, so neither equal cost nor timing indistinguishability is guaranteed.
+
+### What that measures
+
+On a device (`uidbench`, paired sampling, 35280 samples per class) the hidden-against-absent
+difference lands at +0.3 to +4.0 ns across runs, while two uids that do not exist differ from each
+other by 8 to 25 ns, so the ratio the tool prints stays between 0.04 and 0.28 -- below one, which is
+its criterion for the hook hiding inside the natural uid-to-uid spread. The control class (the same
+hidden uid measured twice) is the same size as the signal, so the part attributable to hiding is
+inside the harness's own noise. Absolute values drift by tens of percent between runs -- the same
+class has read 187, 210 and 287 ns on one device -- which is why only the paired numbers are
+compared.
+
+Without a device the work is counted instead (callgrind): a hidden lookup and an *unhidden* lookup in
+the same bucket execute the same instruction sequence with identical counts -- instructions, data
+reads and writes, L1 misses, branch outcomes. Against a uid whose bucket is empty the residue is one
+walk of one entry: six instructions, one extra read, no extra cache line, no extra mispredict.
+
+Three points separate the hook from the lookup it wraps, and they need the same device state to be
+comparable: boot without the module, boot with `uid_tier=tables`, and boot normally. The second and
+third differ by the inline layer alone -- both call the kernel's own `find_user()` -- and the third
+against the first is what the wrapping costs in total.
 
 PROCESS/PGRP paths avoid the new hook. Self/zero targets and some invalid ioprio requests can also
 bypass `find_user`, so pending-window closure is not identical to observing every syscall invocation.
@@ -196,9 +220,14 @@ Diagnostics sit behind a static key (jump label): with the key off the branch is
 ```
 
 What the module is doing is also readable where a user looks: `KAUX_CMD_STATUS` answers with the
-entry counts for both tables, how many apk inodes are held and how many of an apply failed, whether
-the setuid hook was taken and from which implementation, the geometry this module was built for, and
-the last failure. `sync-tool` reads it and writes the one-line summary into the module description,
+entry counts for both tables, how many apk inodes are held and how many of an apply failed, which
+mechanism is in place for each of the two questions by name (`uid_tier`, `setuid_tier` -- "inline
+find_user", "syscall tables", "inline cap_task_fix_setuid", "lsm: cap_task_fix_setuid", "syscall
+setters", empty when nothing installed there), the geometry this module was built for, and the last
+failure. One name per family, written by the runner from the registry, is what makes that line
+answerable: the two used to report through different schemes, and the inline path filled the LSM
+field with the bare function name, so "inline cap_task_fix_setuid" and the LSM hook behind it read
+the same. `sync-tool` reads it and writes the one-line summary into the module description,
 which is where KernelSU and Magisk show a module's state, and compares the module's geometry against
 the running kernel's config (`/proc/config.gz`).
 
