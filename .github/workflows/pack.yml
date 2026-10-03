@@ -1,0 +1,110 @@
+name: pack
+
+on:
+  workflow_run:
+    workflows: [build]
+    types: [completed]
+
+# Collects a finished build and writes the package. It is a separate workflow because a job cannot read
+# what another job sent, and the file ids are only readable once the run is over: this one reads them out
+# of that run's log. The eight ko slots are rewritten here one at a time on purpose -- the album is
+# rearranged by every edit, so parallel writes can put a finished slot back to its placeholder -- and the
+# package goes into the ninth slot last. No artifacts, no repository variables, no deletions.
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  pack:
+    name: collect and write the package
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          submodules: recursive
+      - name: Read the slots out of the finished run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          run=${{ github.event.workflow_run.id }}
+          gh run view "$run" --log > build/build.log
+          first=$(grep -o 'reserved message [0-9]\{1,\}' build/build.log | awk '{print $3}' | head -1 || true)
+          if [ -z "${first:-}" ]; then echo 'this build reserved nothing; nothing to pack'; exit 1; fi
+          echo "first=${first}" >> "$GITHUB_ENV"
+          echo "reserved album starts at ${first}"
+          mkdir -p build/ko
+          slots=(android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18)
+          while read -r slot mid fid; do
+            [ -n "${fid:-}" ] || continue
+            kmi=${slots[$((slot - 1))]}
+            path=$(curl -sS --fail-with-body \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/getFile?file_id=${fid}" \
+              | python3 -c 'import json, sys; print(json.load(sys.stdin)["result"]["file_path"])')
+            curl -sS --fail-with-body -o "build/ko/${kmi}_arm64_tosya.ko" \
+              "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${path}"
+            printf '  slot %s %-18s %8s bytes\n' "$slot" "$kmi" "$(stat -c %s "build/ko/${kmi}_arm64_tosya.ko")"
+          done < <(grep -oE 'slot [0-9]+ message [0-9]+ file_id [A-Za-z0-9_-]+' build/build.log | sort -u)
+          ls -l build/ko
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y nlohmann-json3-dev
+      - uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+          local-cache: false
+      - name: Pack the module from those ko files
+        run: |
+          set -euo pipefail
+          cmake -S . -B build \
+            -DUG_NDK="${{ steps.ndk.outputs.ndk-path }}" \
+            -DUG_USE_PREBUILT_KO=ON
+          cmake --build build -j"$(nproc)"
+          ls -la build/dist
+      - name: Rewrite the eight slots, one at a time
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          slots=(android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18)
+          i=1
+          for kmi in "${slots[@]}"; do
+            mid=$((first + i - 1))
+            ko="build/ko/${kmi}_arm64_tosya.ko"
+            echo "  slot ${i} (message ${mid}) <- ${kmi}"
+            curl -sS --fail-with-body \
+              -F "chat_id=${TELEGRAM_CHAT_ID}" \
+              -F "message_id=${mid}" \
+              -F 'media={"type":"document","media":"attach://file","caption":""}' \
+              -F "file=@${ko}" \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageMedia" > /dev/null
+            i=$((i + 1))
+          done
+      - name: Write the package into the ninth slot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          zip=$(ls build/dist/*.zip | head -1)
+          stamp=$(unzip -p "$zip" module.prop | sed -n 's/^version=//p')
+          version="${{ github.event.workflow_run.head_branch }}"
+          note="tosya ${version} | commit ${{ github.event.workflow_run.head_sha }}\n$(unzip -p "$zip" module.prop | sed -n 's/^version=//p')\npackage $(basename "$zip")"
+          curl -sS --fail-with-body \
+            -F "chat_id=${TELEGRAM_CHAT_ID}" \
+            -F "message_id=$((first + 8))" \
+            -F "media={\"type\":\"document\",\"media\":\"attach://file\",\"caption\":\"${note}\"}" \
+            -F "file=@${zip}" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageMedia" | head -c 200
+          echo
+          echo "package ${stamp} written into slot 9"
