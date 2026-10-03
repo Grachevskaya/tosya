@@ -32,6 +32,7 @@ jobs:
         run: |
           set -euo pipefail
           run=${{ github.event.workflow_run.id }}
+          mkdir -p build
           gh run view "$run" --log > build/build.log
           first=$(grep -o 'reserved message [0-9]\{1,\}' build/build.log | awk '{print $3}' | head -1 || true)
           if [ -z "${first:-}" ]; then echo 'this build reserved nothing; nothing to pack'; exit 1; fi
@@ -39,7 +40,8 @@ jobs:
           echo "reserved album starts at ${first}"
           mkdir -p build/ko
           slots=(android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18)
-          while read -r _ slot _ _ fid; do
+          # 行格式：ko slot <n> message <mid> file_id <fid> ⇒ 取第 2 与第 7 个字段 ✓
+          while read -r slot fid; do
             [ -n "${fid:-}" ] || continue
             kmi=${slots[$((slot - 1))]}
             path=$(curl -sS --fail-with-body \
@@ -48,7 +50,7 @@ jobs:
             curl -sS --fail-with-body -o "build/ko/${kmi}_arm64_tosya.ko" \
               "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${path}"
             printf '  slot %s %-18s %8s bytes\n' "$slot" "$kmi" "$(stat -c %s "build/ko/${kmi}_arm64_tosya.ko")"
-          done < <(grep -oE 'ko slot [0-9]+ message [0-9]+ file_id [A-Za-z0-9_-]+' build/build.log | sort -u)
+          done < <(grep -oE 'ko slot [0-9]+ message [0-9]+ file_id [A-Za-z0-9_-]+' build/build.log | awk '{print $2, $7}' | sort -u)
           ls -l build/ko
       - name: Install build dependencies
         run: |
