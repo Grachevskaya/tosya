@@ -34,10 +34,14 @@ jobs:
           run=${{ github.event.workflow_run.id }}
           mkdir -p build
           gh run view "$run" --log > build/build.log
-          first=$(grep -o 'reserved message [0-9]\{1,\}' build/build.log | awk '{print $3}' | head -1 || true)
-          if [ -z "${first:-}" ]; then echo 'this build reserved nothing; nothing to pack'; exit 1; fi
-          echo "first=${first}" >> "$GITHUB_ENV"
-          echo "reserved album starts at ${first}"
+          # 九格的 message_id 由 reserve 原样打印（不连续 ✗ 不能算术猜 ✓）
+          ids=$(grep -o 'reserved ids [0-9 ]\{1,\}' build/build.log | head -1 | cut -d' ' -f3- || true)
+          if [ -z "${ids// /}" ]; then echo 'this build reserved nothing; nothing to pack'; exit 1; fi
+          read -r -a slot_ids <<< "$ids"
+          [ "${#slot_ids[@]}" = 9 ] || { echo "expected nine slot ids, got ${#slot_ids[@]}"; exit 1; }
+          echo "first=${slot_ids[0]}" >> "$GITHUB_ENV"
+          echo "slot ids: ${slot_ids[*]}"
+          printf '%s\n' "${slot_ids[@]}" > build/slot_ids.txt
           mkdir -p build/ko
           slots=(android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18)
           # 行格式：ko slot <n> message <mid> file_id <fid> ⇒ 取第 2 与第 7 个字段 ✓
