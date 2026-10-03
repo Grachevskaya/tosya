@@ -5,11 +5,10 @@ on:
     workflows: [build]
     types: [completed]
 
-# Collects a finished build and writes the package. It is a separate workflow because a job cannot read
-# what another job sent, and the file ids are only readable once the run is over: this one reads them out
-# of that run's log. The eight ko slots are rewritten here one at a time on purpose -- the album is
-# rearranged by every edit, so parallel writes can put a finished slot back to its placeholder -- and the
-# package goes into the ninth slot last. No artifacts, no repository variables, no deletions.
+# Collects a finished build and writes the release into the reserved album. This is the only writer the
+# album ever has: an album is rearranged server-side by every edit, so the eight ko slots are written
+# one after another here, and the package goes into the ninth slot last. It is a separate workflow
+# because the ids of what the build sent are only readable once that run is over.
 
 permissions:
   contents: read
@@ -30,7 +29,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -euo pipefail
           run=${{ github.event.workflow_run.id }}
@@ -41,7 +39,7 @@ jobs:
           echo "reserved album starts at ${first}"
           mkdir -p build/ko
           slots=(android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18)
-          while read -r slot mid fid; do
+          while read -r _ slot _ _ fid; do
             [ -n "${fid:-}" ] || continue
             kmi=${slots[$((slot - 1))]}
             path=$(curl -sS --fail-with-body \
@@ -50,7 +48,7 @@ jobs:
             curl -sS --fail-with-body -o "build/ko/${kmi}_arm64_tosya.ko" \
               "https://api.telegram.org/file/bot${TELEGRAM_BOT_TOKEN}/${path}"
             printf '  slot %s %-18s %8s bytes\n' "$slot" "$kmi" "$(stat -c %s "build/ko/${kmi}_arm64_tosya.ko")"
-          done < <(grep -oE 'slot [0-9]+ message [0-9]+ file_id [A-Za-z0-9_-]+' build/build.log | sort -u)
+          done < <(grep -oE 'ko slot [0-9]+ message [0-9]+ file_id [A-Za-z0-9_-]+' build/build.log | sort -u)
           ls -l build/ko
       - name: Install build dependencies
         run: |
@@ -70,7 +68,7 @@ jobs:
             -DUG_USE_PREBUILT_KO=ON
           cmake --build build -j"$(nproc)"
           ls -la build/dist
-      - name: Rewrite the eight slots, one at a time
+      - name: Write the eight ko slots, one after another
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -99,7 +97,7 @@ jobs:
           zip=$(ls build/dist/*.zip | head -1)
           stamp=$(unzip -p "$zip" module.prop | sed -n 's/^version=//p')
           version="${{ github.event.workflow_run.head_branch }}"
-          note="tosya ${version} | commit ${{ github.event.workflow_run.head_sha }}\n$(unzip -p "$zip" module.prop | sed -n 's/^version=//p')\npackage $(basename "$zip")"
+          note="tosya ${version} | commit ${{ github.event.workflow_run.head_sha }}\n${stamp}\npackage $(basename "$zip")"
           curl -sS --fail-with-body \
             -F "chat_id=${TELEGRAM_CHAT_ID}" \
             -F "message_id=$((first + 8))" \
