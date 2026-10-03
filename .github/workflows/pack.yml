@@ -81,9 +81,11 @@ jobs:
         run: |
           set -euo pipefail
           slots=(android12-5.10 android13-5.10 android13-5.15 android14-5.15 android14-6.1 android15-6.6 android16-6.12 android17-6.18)
+          mapfile -t slot_ids < build/slot_ids.txt
+          [ "${#slot_ids[@]}" = 9 ] || { echo "expected nine slot ids, got ${#slot_ids[@]}"; exit 1; }
           i=1
           for kmi in "${slots[@]}"; do
-            mid=$((first + i - 1))
+            mid=${slot_ids[$((i - 1))]}
             ko="build/ko/${kmi}_arm64_tosya.ko"
             echo "  slot ${i} (message ${mid}) <- ${kmi}"
             curl -sS --fail-with-body \
@@ -106,7 +108,7 @@ jobs:
           note="tosya ${version} | commit ${{ github.event.workflow_run.head_sha }}\n${stamp}\npackage $(basename "$zip")"
           curl -sS --fail-with-body \
             -F "chat_id=${TELEGRAM_CHAT_ID}" \
-            -F "message_id=$((first + 8))" \
+            -F "message_id=${slot_ids[8]}" \
             -F "media={\"type\":\"document\",\"media\":\"attach://file\",\"caption\":\"${note}\"}" \
             -F "file=@${zip}" \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageMedia" | head -c 200
