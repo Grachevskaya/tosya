@@ -23,15 +23,14 @@
  * itself is exported (Module.symvers), it is only the declaration that lives in
  * linux/security.h.
  */
-#ifndef UIDFAKE_HOST_BUILD
+#ifndef TOSYA_HOST_BUILD
 struct cred;
-extern void security_cred_getsecid(const struct cred *cred, u32 *secid);
 #endif
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/user.h>
 
-#include "uidfake.h"
+#include "tosya.h"
 
 /*
  * One immutable policy snapshot behind an RCU pointer: a query reads the
@@ -42,6 +41,8 @@ extern void security_cred_getsecid(const struct cred *cred, u32 *secid);
  * the snapshot it replaced is freed after a grace period.
  */
 struct policy {
+	// What the inlined half of the query reads; filled in by policy_publish().
+	struct policy_hot hot;
 	struct uid_pair *tgt;
 	/* One entry per distinct caller mask, `nmask_words` words each; a slot names
 	 * its mask with mask_id. Keeping the masks themselves in the slots is what
@@ -65,8 +66,9 @@ static struct uid_pair dummy_tgt[POLICY_MIN_LINES * POLICY_WAY];
 static u64 dummy_mask_pool[POLICY_MIN_LINES * POLICY_WAY];
 static u16 dummy_cid[POLICY_APP_ID_SPAN];
 
-/* The empty snapshot a query starts on, so the hot path needs no NULL check. */
+// The empty snapshot a query starts on, so the hot path needs no NULL check.
 static struct policy g_empty = {
+	.hot = { .cid = dummy_cid, .wild = 0 },
 	.tgt = dummy_tgt,
 	.mask_pool = dummy_mask_pool,
 	.cid = dummy_cid,
@@ -79,7 +81,7 @@ static struct policy g_empty = {
 
 /* The published snapshot: one pointer swap, so a query reads a consistent
  * whole. */
-static struct policy *g_pol __rcu = &g_empty;
+struct policy *g_pol __rcu = &g_empty;
 
 struct apply_pair {
 	u32 caller;
@@ -123,13 +125,13 @@ struct uid_hash {
 	bool multiply;
 };
 
-/* Assumed until detect_uid_hash() says otherwise; logged either way. */
+// Assumed until detect_uid_hash() says otherwise; logged either way.
 static struct uid_hash g_hash = { .bits = 7, .shift = 25, .multiply = false };
 
 static u32 uid_hash_apply(const struct uid_hash *h, u32 uid)
 {
 	if (h->multiply)
-		/* hash_32 truncates the product before extracting its high bits. */
+		// hash_32 truncates the product before extracting its high bits.
 		return (u32)(uid * UID_HASH_GOLDEN) >> h->shift;
 
 	return ((uid >> h->bits) + uid) & ((1u << h->bits) - 1);
@@ -142,11 +144,11 @@ static bool uid_hash_bits_ok(u32 bits)
 
 /*
  * Scan find_user() for one of the two instruction patterns. aarch64:
- *   lsr  wA, wB, #BITS                  UBFM 32-bit with imms = 31
- *   add  wC, w?, w?                     one operand is wA
+ *   lsr wA, wB, #BITS UBFM 32-bit with imms = 31
+ *   add wC, w?, w?                     one operand is wA
  *   movz wD, #0x8647
  *   movk wD, #0x61c8, lsl #16
- *   lsr  wD, wD, #32-BITS
+ *   lsr wD, wD, #32-BITS
  */
 static bool detect_uid_hash(struct uid_hash *out)
 {
@@ -173,7 +175,7 @@ static bool detect_uid_hash(struct uid_hash *out)
 			}
 		}
 
-		/* movz wD, #0x8647 */
+		// movz wD, #0x8647
 		if ((w0 & 0xFF800000u) != 0x52800000u ||
 		    ((w0 >> 5) & 0xFFFFu) != 0x8647u ||
 		    ((w0 >> 21) & 0x3u) != 0u)
@@ -181,7 +183,7 @@ static bool detect_uid_hash(struct uid_hash *out)
 
 		/*
      * hash_32: movz #0x8647 ... movk #0x61c8, lsl #16 ... umull / mul ...
-     *          lsr #(32 - BITS)   or   ubfx #(32 - BITS), #32
+     *          lsr #(32 - BITS)   or ubfx #(32 - BITS), #32
      *
      * The two halves of the constant can be separated by a BTI/hint
      * (clang 14 inserts one), and the bucket extraction can be a UBFX
@@ -209,7 +211,7 @@ static bool detect_uid_hash(struct uid_hash *out)
 						continue;
 					lsb = (wk >> 16) & 0x3Fu;
 					imms = (wk >> 10) & 0x3Fu;
-					/* lsr (32/64-bit) or ubfx covering the whole word */
+					// lsr (32/64-bit) or ubfx covering the whole word
 					if (imms != 31u && imms != 63u &&
 					    imms != (lsb + 31u))
 						continue;
@@ -221,7 +223,7 @@ static bool detect_uid_hash(struct uid_hash *out)
 					out->multiply = true;
 					return true;
 				}
-				break; /* constant found, its high half is unique */
+				break; // constant found, its high half is unique
 			}
 		}
 	}
@@ -245,9 +247,9 @@ struct layout {
 		mirror, probe;
 };
 /*
- * The buffers a layout is built in, kept between applies. They have the same size every
- * time -- the most a policy can need -- and a config change or a boot used to allocate and
- * zero half a megabyte of them for nothing. One set is enough because applies are
+ * The buffers a layout is built in, kept between applies: they have the same size every
+ * time -- the most a policy can need -- and allocating and zeroing half a megabyte per
+ * apply would be work for nothing. One set is enough because applies are
  * serialised: the module applies them from one netlink command under g_apply_lock, and the
  * published snapshot is a separate allocation. policy_free() gives them back at unload.
  */
@@ -257,13 +259,12 @@ static u32 *g_mhash;
 static u32 g_mhash_size;
 
 /* distinct callers of the policy -> dense hider ids; -1 if there are too many
- */
-/*
+ *
  * The hider table: one id per app, never per uid. A policy carries every user's
- * uids -- the tool expands them -- and both lookups (the tag one and
+ * uids -- the userspace half expands them -- and both lookups (the tag one and
  * policy_lookup_as) identify the caller by the app id inside its uid, so keying
  * this by the full uid would leave the first user's masks under an id nobody
- * asks for, and that user's pairs would simply not be hidden.
+ * asks for, and that user's pairs would not be hidden.
  */
 static int build_hiders(struct apply_pair *p, u32 n, u32 *hid)
 {
@@ -272,7 +273,7 @@ static int build_hiders(struct apply_pair *p, u32 n, u32 *hid)
 	for (i = 0; i < n; i++) {
 		u32 c = p[i].caller % 100000u;
 
-		if (c == 0) /* caller==0 hides from everyone, no id needed */
+		if (c == 0) // caller==0 hides from everyone, no id needed
 			continue;
 		for (j = 0; j < nh; j++)
 			if (hid[j] == c)
@@ -286,7 +287,7 @@ static int build_hiders(struct apply_pair *p, u32 n, u32 *hid)
 	return (int)nh;
 }
 
-/* the caller table: one u16 per app id, 0xffff = not a hider */
+// the caller table: one u16 per app id, 0xffff = not a hider
 static int layout_cids(struct layout *l, const u32 *hid, u32 nh)
 {
 	u32 i;
@@ -301,7 +302,7 @@ static int layout_cids(struct layout *l, const u32 *hid, u32 nh)
 
 		if (app < POLICY_APP_ID_MIN ||
 		    app >= POLICY_APP_ID_MIN + POLICY_APP_ID_SPAN) {
-			pr_warn("uidfake: caller %u is not an app uid; it cannot be matched\n",
+			pr_warn("tosya: caller %u is not an app uid; it cannot be matched\n",
 				hid[i]);
 			continue;
 		}
@@ -358,21 +359,19 @@ static bool trial_fit(const struct apply_pair *p, u32 n, u8 *used, u32 nlines,
 }
 
 /* target slots and their masks, on the kernel's own bucket lines when it fits
- */
-/*
- * Find or add a caller mask. The masks used to be stored one per slot -- nlines x
- * POLICY_WAY of them, nmask_words wide each -- so a policy from the field (24000
- * pairs, 600 callers) carried tens of megabytes of table for the handful of
- * distinct caller sets a policy really has, and every query read from memory no
- * cache could hold.
+ *
+ * Find or add a caller mask. One mask per slot would be nlines x POLICY_WAY of
+ * them, nmask_words wide each: tens of megabytes of table for a policy of
+ * 24000 pairs and 600 callers for the handful of distinct caller sets it
+ *  has, every query reading from memory no cache could hold.
  *
  * Interning makes the allocation and the working set proportional to the number of
  * *different* sets. A hash finds a candidate and the comparison is a full memcmp:
  * a collision that was believed would hide a target from a caller that was never
  * configured to see it hidden.
  */
-static u16 uf_mask_intern(u64 *pool, u32 *hash, u32 hsize, u32 *npool,
-			  const u64 *bits, u32 mw)
+static u16 tosya_mask_intern(u64 *pool, u32 *hash, u32 hsize, u32 *npool,
+			     const u64 *bits, u32 mw)
 {
 	u32 h = 0, i;
 	u32 slot;
@@ -386,7 +385,7 @@ static u16 uf_mask_intern(u64 *pool, u32 *hash, u32 hsize, u32 *npool,
 			const u32 use = (*npool)++;
 
 			if (use > 0xfffeu)
-				return 0xffffu; /* more distinct masks than a slot id can name */
+				return 0xffffu; // more distinct masks than a slot id can name
 			memcpy(&pool[(size_t)use * mw], bits,
 			       (size_t)mw * sizeof(u64));
 			hash[h] = use;
@@ -403,9 +402,9 @@ static int layout_targets(struct layout *l, struct apply_pair *p, u32 n,
 			  const u32 *hid, u32 nh)
 {
 	struct uid_pair *tgt;
-	u64 *masks; /* the interned caller masks, nmask_words each */
-	u64 *scratch; /* the mask of the target being laid out */
-	u32 *mhash; /* mask -> pool slot, for finding an equal one again */
+	u64 *masks; // the interned caller masks, nmask_words each
+	u64 *scratch; // the mask of the target being laid out
+	u32 *mhash; // mask -> pool slot, for finding an equal one again
 	u8 *used;
 	u32 i, j, k, nlines, shift, mirror, nt = 0, maxdist = 0, hsize,
 					    npool = 1;
@@ -463,7 +462,7 @@ static int layout_targets(struct layout *l, struct apply_pair *p, u32 n,
 			break;
 		}
 		if (nlines >= POLICY_MAX_LINES) {
-			pr_warn("uidfake: policy fits no line layout\n");
+			pr_warn("tosya: policy fits no line layout\n");
 			return -1;
 		}
 		nlines <<= 1;
@@ -478,7 +477,7 @@ static int layout_targets(struct layout *l, struct apply_pair *p, u32 n,
 	hsize = 16;
 	while (hsize < (u32)n * 2u && hsize < (1u << 17))
 		hsize <<= 1;
-	/* Slot zero is a complete empty mask, including every caller word. */
+	// Slot zero is a complete empty mask, including every caller word.
 	masks = kcalloc(((size_t)n + 1u) * l->nmask_words, sizeof(*masks),
 			GFP_KERNEL);
 	if (g_scratch == NULL)
@@ -503,12 +502,12 @@ static int layout_targets(struct layout *l, struct apply_pair *p, u32 n,
 		u32 t, c, app;
 
 		if (i == n || (i && p[i - 1].target != p[i].target)) {
-			const u16 id = uf_mask_intern(masks, mhash, hsize,
-						      &npool, scratch,
-						      l->nmask_words);
+			const u16 id = tosya_mask_intern(masks, mhash, hsize,
+							 &npool, scratch,
+							 l->nmask_words);
 
 			if (id == 0xffffu) {
-				pr_warn("uidfake: more than 65534 distinct caller masks; policy refused\n");
+				pr_warn("tosya: more than 65534 distinct caller masks; policy refused\n");
 				goto fail;
 			}
 			tgt[last].mask_id = id;
@@ -600,6 +599,9 @@ static void policy_publish(struct policy *np)
 {
 	struct policy *old;
 
+	// The inlined half reads these out of the snapshot the swap publishes.
+	np->hot.cid = np->cid;
+	np->hot.wild = np->wild;
 	old = xchg(&g_pol, np);
 	synchronize_rcu();
 	policy_release(old);
@@ -626,9 +628,9 @@ void policy_apply(const u32 *pairs, u32 npairs)
 	for (i = 0; i < npairs && n < POLICY_MAX_PAIRS; i++) {
 		u32 target = pairs[2 * i + 1];
 
-		if (target < 10000) /* never hide target 0 or system uids */
+		if (target < 10000) // never hide target 0 or system uids
 			continue;
-		if (pairs[2 * i] == 0) /* caller 0: hide from everyone */
+		if (pairs[2 * i] == 0) // caller 0: hide from everyone
 			wild = 1;
 		tmp[n].caller = pairs[2 * i];
 		tmp[n].target = target;
@@ -639,7 +641,7 @@ void policy_apply(const u32 *pairs, u32 npairs)
 	 * The target builder requires at least one target before interning a mask. */
 	if (!n) {
 		policy_publish(&g_empty);
-		pr_info("uidfake: cleared policy\n");
+		pr_info("tosya: cleared policy\n");
 		goto out;
 	}
 
@@ -648,26 +650,26 @@ void policy_apply(const u32 *pairs, u32 npairs)
 
 		if (detect_uid_hash(&h))
 			g_hash = h;
-		pr_info("uidfake: uid hash = %s bits=%u\n",
+		pr_info("tosya: uid hash = %s bits=%u\n",
 			g_hash.multiply ? "hash_32" : "__uidhashfn",
 			g_hash.bits);
 		if (g_hash.multiply)
-			pr_warn("uidfake: this kernel hashes uids in a form this module does not model; targets are still hidden, but a hidden lookup will not share a bucket with an absent uid\n");
+			pr_warn("tosya: this kernel hashes uids in a form this module does not model; targets are still hidden, but a hidden lookup will not share a bucket with an absent uid\n");
 	}
 
 	sort_pairs(tmp, n);
 
 	nh = build_hiders(tmp, n, hid);
 	if (nh < 0)
-		pr_err("uidfake: more than %u callers; keeping previous policy\n",
+		pr_err("tosya: more than %u callers; keeping previous policy\n",
 		       POLICY_MAX_CALLERS);
 	else if (layout_cids(&l, hid, (u32)nh))
-		pr_err("uidfake: cannot lay out %d caller(s); keeping previous policy\n",
+		pr_err("tosya: cannot lay out %d caller(s); keeping previous policy\n",
 		       nh);
 	else {
 		l.nmask_words = nh ? ((u32)nh + 63) / 64 : 1;
 		if (layout_targets(&l, tmp, n, hid, (u32)nh))
-			pr_err("uidfake: cannot lay out %u pair(s); keeping previous policy\n",
+			pr_err("tosya: cannot lay out %u pair(s); keeping previous policy\n",
 			       n);
 		else
 			ok = 1;
@@ -698,13 +700,13 @@ void policy_apply(const u32 *pairs, u32 npairs)
 	if (ok) {
 		u32 checked = 0, hits = 0;
 
-		/* answer every configured pair from the table that is now live */
+		// answer every configured pair from the table that is now live
 		for (i = 0; i < n; i++) {
 			if (tmp[i].caller == 0)
 				continue;
 			/*
 			 * A caller asking about itself is answered 0 by the hot path on
-			 * purpose, and the tool never emits such a pair: counting it here
+			 * purpose, and the userspace half never emits such a pair: counting it here
 			 * would report a policy that is in fact complete as broken.
 			 */
 			if (tmp[i].caller % 100000u == tmp[i].target % 100000u)
@@ -715,11 +717,11 @@ void policy_apply(const u32 *pairs, u32 npairs)
 				hits++;
 		}
 		if (hits != checked)
-			pr_err("uidfake: self-check FAILED: %u/%u pairs match\n",
+			pr_err("tosya: self-check FAILED: %u/%u pairs match\n",
 			       hits, checked);
 		else
-			pr_info("uidfake: self-check: %u/%u pairs match\n",
-				hits, checked);
+			pr_info("tosya: self-check: %u/%u pairs match\n", hits,
+				checked);
 	}
 
 out:
@@ -736,7 +738,7 @@ out:
 		return;
 	}
 
-	pr_info("uidfake: injected %u pair(s), %u caller(s), %u line(s), %u mask word(s) in %u mask(s), probe %u, %s layout\n",
+	pr_info("tosya: injected %u pair(s), %u caller(s), %u line(s), %u mask word(s) in %u mask(s), probe %u, %s layout\n",
 		npairs, np->ncallers, np->nlines, np->nmask_words, l.nmasks,
 		np->nprobe, np->mirror ? "uid-hash" : "own-hash");
 }
@@ -753,28 +755,13 @@ out:
  * of the line a target occupies never changes the cache set because the whole
  * line is read.
  *
- * The caller is matched exactly, not by a hash bit: the lookup compares it
- * against the table of configured callers and builds a one-hot word, so a
- * caller that is not in the policy gets a zero (plus the wildcard bit) and can
- * never match a target's mask by accident. A shared mask bit would hide a
- * target from an app that was never configured to see it hidden, which is how
- * masking schemes silently break the policy.
- *
- * Cost is fixed: POLICY_WAY slot loads from the line plus POLICY_CALLERS
- * comparisons, from fixed offsets, no loop over data, no data branch, and the
- * table (16 lines = 1 KB at 7 hash bits) stays in L1. A policy that does not
- * fit the pooled layout falls back to our own hash over a table sized from the
- * target count, blended branch-free.
- *
  * What no dynamic policy hook can remove is stated plainly: consulting a policy
  * costs two cache lines per query -- the target's line and the fixed caller
  * table.
- */
-/*
- * Table line index: the top bits of a 64-bit product, so the result is always
- * in [0, 2^(32 - shift)). The multiplier is 64-bit on purpose -- with a 32-bit
- * one the high bits stay zero for small uids and every uid would land in the
- * same line.
+ *
+ * The table line itself is the top bits of a 64-bit product, always in [0, 2^(32 - shift)); the
+ * multiplier is 64-bit on purpose, because with a 32-bit one the high bits stay zero for small
+ * uids.
  */
 static u32 hash_line(u64 key, u32 shift)
 {
@@ -789,7 +776,7 @@ static u32 policy_hash(u32 caller, u32 target, u32 shift)
 	return hash_line(((u64)target << 32) | caller, shift);
 }
 
-/* the kernel's uid hash, branch-free for both detected variants */
+// the kernel's uid hash, branch-free for both detected variants
 static u32 policy_bucket(u32 target, u32 bits, u32 multiply)
 {
 	u32 hfn = ((target >> bits) + target) & ((1u << bits) - 1);
@@ -811,7 +798,7 @@ static u32 policy_subslot(u32 target)
 	       (POLICY_WAY - 1);
 }
 
-/* the line the kernel's bucket lookup touches for this uid */
+// the line the kernel's bucket lookup touches for this uid
 static u32 policy_index_mirror(u32 target)
 {
 	return policy_bucket(target, g_hash.bits, (u32)g_hash.multiply) >> 3;
@@ -834,141 +821,37 @@ static u32 policy_index_mode(u32 target, u32 mirror, u32 shift)
 }
 
 /*
- * Hider id of a caller. App uids are 10000 + appid + user * 100000, so the app
- * id alone is the index: one load instead of a search. Anything outside the app
- * range gets POLICY_ID_NONE via csel, and the caller dimension is allowed to
- * differ between callers, so this costs nothing on the fingerprint side.
- */
-/*
- * The identity tag, see uidfake.h. Both directions are plain bit field accesses
- * on the task's flags, which no other subsystem numbers this high, and only
- * setting is done - never clearing.
- */
-/*
- * The count lives inside the published object. Two separate globals (a pointer
- * and a length) can be seen mismatched - the reader then walks past the end of
- * a shorter array, which is a kernel crash - and that is what a freshly
- * installed table plus an isolated process hitting the new path managed to do.
- * One pointer, one object, one store.
- */
-
-/*
- * Both are exported symbols; the declarations live in linux/security.h, which
- * the trimmed header sets do not all carry. Every kernel this module is built
- * against declares this shape.
- */
-
-/*
+ * The layout, in one place.
  *
- * the kernels this module is built against, so both are written out and chosen
- * by version. Nothing resolves a symbol by name and nothing is called through a
- * function pointer: on GKI a mismatched indirect call is a KCFI failure, and
- * that is a panic.
- */
-/*
+ * A target occupies one line: the index is the top bits of a 64-bit product of the uid, and the
+ * line is read in full, so which slot of it a target sits in never changes what a query touches.
+ * The caller is matched exactly -- the caller table builds a one-hot word, so a caller that is not
+ * in the policy gets a zero and cannot match a target's mask by accident, which a shared mask bit
+ * would do. Masks are interned, one entry per distinct set of callers: one per slot would be tens of
+ * megabytes for the handful of sets a policy has. Cost is fixed: POLICY_WAY slot loads plus
+ * POLICY_CALLERS comparisons from fixed offsets, no loop over data, no data branch, and the table
+ * (16 lines = 1 KB at 7 hash bits) stays in L1. A policy that does not fit the pooled layout falls
+ * back to a hash over a table sized from the target count, blended branch-free.
  *
- * declares (u32, char **, u32 *). Nothing resolves a symbol by name and nothing
- * is called through a function pointer: on GKI a mismatched indirect call is a
- * KCFI failure, which is a panic.
- */
-
-/*
- * sid -> app id, built from what the kernel can read itself.
- * security_cred_getsecid() is exported and called directly; the map is filled
- * by the id-setter hooks, which see both ends of every identity change: a uid
- * going from a system uid to an app uid means the new SID belongs to that app,
- * and a uid leaving an app uid (isolated process, app_zygote child) means the
- * new SID belongs to whatever app the old SID already belonged to.
+ * The identity tag and the window bit live in the high bits of thread_info.flags, the same word as
+ * the TIF_* bits the rest of the kernel updates with set_bit()/clear_bit(): a read-modify-write of
+ * the module's own would lose a TIF_* bit set in between, so the word moves with a compare-and-swap. A task
+ * that is named keeps its name -- the naming runs on another thread of the same group, and every
+ * hiding rule hangs on that name -- and a task that already carries one is never re-tagged.
+ * Security hooks are reached by writing out the declaration this module is built against and
+ * choosing it by version, never by resolving a symbol by name and never through a function pointer:
+ * on GKI a mismatched indirect call is a KCFI failure, which is a panic.
  *
- * exported, so it had to be called through a name-resolved pointer - a KCFI
- * failure, a panic) or
- */
-
-/*
- * sid -> app id. A spinlock over a fixed array: it is written from the
- * id-setter hooks and read on the syscall path, both of which can already be
- * inside an RCU read side, so this must never sleep, allocate or wait for a
- * grace period. (A first version used RCU with synchronize_rcu() per note; that
- * is fatal when the caller holds rcu_read_lock, and needlessly slow from a
- * hook.)
- */
-/*
- * Called from the id-setter hooks once a change succeeded. before_sid is the
- * SID the task had before the syscall, after_sid the one it has now.
- */
-
-/*
- * Prime the SID map from the tasks that already exist. A module loaded onto a
- * running system has never seen their transitions, and an app process without a
- * tag has no hiding rules at all - that is why a manual rmmod/insmod made the
- * hiding disappear until every app was restarted. The walk reads each task's
- * own cred: the same trust the uid based design always had for processes that
- * predate us, while everything created afterwards goes through the hooks.
- */
-
-/*
- * Give the processes that already exist their identity. A module loaded onto a
- * running system has never seen their transitions, and an untagged app process
- * would have no hiding rules at all - which is exactly what a manual
- * rmmod/insmod looked like. The walk reads each task's own cred, the same trust
- * the uid based design always had, and it only writes the tag: no allocation,
- * no lock and nothing that can sleep, so it is safe to run here.
- */
-/*
- * The identity tag and the window bit live in the high bits of thread_info.flags,
- * in the same word as the TIF_* bits the rest of the kernel updates with
- * set_bit()/clear_bit(). A read-modify-write of our own would lose a TIF_* bit set
- * in between -- TIF_NEED_RESCHED, TIF_NOTIFY_RESUME -- so the word is moved with a
- * compare-and-swap: only the tag bits (and the window bit) are touched, and every
- * other bit is carried over exactly as it was read.
- */
-
-/*
- * Mark a task as waiting to be named, and only that: the tag field is left exactly
- * as it is. A task that is named in the meantime keeps its name -- the naming runs
- * on another thread of the same group, and the name is what every hiding rule of
- * that task hangs on, so taking a fresh one away is the one thing this must not do.
- * Read, test and compare-and-swap, in that order, for the same reason.
- */
-/* The tag of any task, current or not; only the field, never the window bit. */
-/*
- * isolated uid -> app id. The SID of an app_zygote child is switched to
- * isolated_app inside the child, after our hook has run, so the SID map can
- * never learn it. What the hook does see is the transition itself: the child
- * leaves with an isolated uid while the SID it carries at that moment is still
- * the app's. Recording the uid under that app closes the loop, and the lookup
- * reads the same uid back with current_fsuid().
- */
-
-/*
- * A task carries its name already. Nothing that follows should touch it: the name
- * was set once, from the one transition that gave the task its identity, and a
- * process that changes ids again -- setresuid(uid, uid, uid) is the usual one --
- * must not be re-tagged or reported again.
- */
-/*
- * The app id an untagged process belongs to, through its own SID. Cached in the
- * tag, so the translation happens once per process.
- */
-
-/*
- * Same lines and same loads for a given (caller, target), whatever the answer: the
- * target's line is read in full, and from the mask of each probed slot (nprobe is a
- * property of the policy, never of the answer) exactly one word -- the caller's own --
- * is read. Interning the masks (one entry per distinct set of callers) keeps what a
- * query touches small as the policy grows: a policy from the field carried tens of
- * megabytes of them, one copy per slot, for the handful of different sets there are.
- */
-/*
- * The hot path, __always_inline so the syscall wrappers (which all reach it
- * through uid_hook()) each get a copy instead of paying a call, a prologue and
- * register saves.
+ * The count of entries lives inside the published object. Two separate globals, a pointer and a
+ * length, can be seen mismatched and a reader then walks past the end of a shorter array: one
+ * pointer, one object, one store.
+ *
+ * The hot path is __always_inline so the syscall wrappers, which all reach it through uid_hook(),
+ * each get a copy instead of paying a call, a prologue and register saves.
  */
 static __always_inline u32 policy_cid_by_app(u32 app, const struct policy *p)
 {
-	u32 id = (app < UF_APP_SPAN) ? p->cid[app] : 0xffffu;
-
-	return (id != 0xffffu) ? id : POLICY_ID_NONE;
+	return policy_cid_hot(&p->hot, app);
 }
 
 /*
@@ -977,9 +860,9 @@ static __always_inline u32 policy_cid_by_app(u32 app, const struct policy *p)
  * that was read either way -- so this is the same load for a hidden target as for one
  * that was never configured, which is the whole point of the layout.
  *
- * Reading the mask out in full was the old way. It kept the load count equal too, and
- * it cost nmask_words loads for every probed slot: ten of them for a policy with 600
- * callers, twenty for the two slots a policy that size probes, on every hooked syscall.
+ * Reading the mask out in full keeps the load count equal too, and costs nmask_words loads
+ * per probed slot: ten for a policy with 600 callers, twenty for the two slots a policy that
+ * size probes.
  */
 static u32 mask_bit(const u64 *m, u32 cid)
 {
@@ -990,15 +873,11 @@ static u32 mask_bit(const u64 *m, u32 cid)
 
 /*
  * A select the compiler cannot undo. "?:" and the mask that means the same thing both get
- * turned back into a branch when the compiler thinks that is cheaper -- it did, twice, on
- * the replacement value: cbz on (hit|wild), then cbz on repl. A branch on the answer is
- * exactly what must not exist here: a predictor can learn it and a clock can see it, and
- * that is the whole difference this module is trying not to have. cmp + csel, two
- * instructions, the same two whatever the answer is.
+ * turned back into a branch when the compiler thinks that is cheaper, and a branch on the
+ * answer is exactly what must not exist here: a predictor can learn it and a clock can see
+ * it. cmp + csel, two instructions, the same two whatever the answer is.
  */
-/* The core: app is an app id (uid % 100000 - 10000), already known to be one.
- */
-static __always_inline u32 policy_lookup_core(uid_t target, u32 app)
+noinline u32 policy_lookup_slow(uid_t target, u32 app)
 {
 	const struct policy *p;
 	u32 t = (u32)target;
@@ -1067,7 +946,8 @@ static __always_inline u32 policy_lookup_core(uid_t target, u32 app)
 	 * is happy to turn "?:" into a branch here (it did: cbz on hit|wild), and a branch
 	 * on the answer is a branch a predictor can learn and a clock can see.
 	 */
-	repl = (u32)uf_select((u64)(POLICY_REPL_BASE + rk), (u64)0, hit | wild);
+	repl = (u32)tosya_select((u64)(POLICY_REPL_BASE + rk), (u64)0,
+				 hit | wild);
 	rcu_read_unlock();
 
 	return repl;
@@ -1078,43 +958,35 @@ static __always_inline u32 policy_lookup_core(uid_t target, u32 app)
  * app uid to has no hiding rules of its own, and a tagged one answers as the
  * app it was born as however often it changes uid afterwards. The caller
  * argument is deliberately ignored.
- */
-
-/*
+ *
  * The lookup. The tag is the only identity source: it is written where an
  * identity is created, so an untagged process is one that already existed when
  * the module was loaded, and it gets no rules at all rather than an identity
  * derived from a uid that anything could have changed.
- */
-/*
+ *
  * The inode side -- the base.apk whose ->open is replaced so the first file of
  * its own code that an isolated child opens names it -- is in inode_hook.c.
+ *
+ * The cold paths are kept out of line so the query itself stays small enough to inline, and the
+ * one below is where the wait for a name ends: an isolated child that is still unnamed but already
+ * asking questions means its own code is running, so it answers as an app without rules from here
+ * on, deterministically and with no deadline. tosya_tag_close() itself is provided by hooks.c and
+ * stubbed out by the host test.
  */
+void tosya_tag_close(void);
 
-/* true while an isolated child is still waiting for the apk that names it */
-/* Cold paths, kept out of line so the query itself stays small enough to
- * inline. */
-/*
- * An isolated child that is still unnamed but already asking questions means
- * its own code is running: the apk that would have named it is opened long
- * before that. This is where the window ends -- deterministically, with no
- * deadline -- and the child answers as an app without rules.
- */
-/* Provided by hooks.c; the host test stubs it out. */
-void uidfake_tag_close(void);
-
-static noinline void uidfake_close_pending(void)
+static noinline void tosya_close_pending(void)
 {
-	uidfake_tag_close();
+	tosya_tag_close();
 }
 
-static noinline void uidfake_warn_untagged(void)
+static noinline void tosya_warn_untagged(void)
 {
 	static bool warned;
 
-	if (!warned && UF_DEBUG_ON()) {
+	if (!warned && TOSYA_DEBUG_ON()) {
 		warned = true;
-		pr_info("uidfake: untagged caller uid %u flags %lx comm %s\n",
+		pr_info("tosya: untagged caller uid %u flags %lx comm %s\n",
 			(u32)__kuid_val(current_fsuid()),
 			(unsigned long)task_thread_info(current)->flags,
 			current->comm);
@@ -1122,32 +994,20 @@ static noinline void uidfake_warn_untagged(void)
 }
 
 /*
- * The query itself: identity from the tag, then the range rules. Inlined into
- * every hooked wrapper (that is why policy.c is compiled as part of hooks.c),
- * with the two log paths out of line -- they are taken once per process at
- * most, and keeping them here would push a few hundred instructions into twelve
- * wrappers.
+ * The two log paths of a caller with no tag, out of line: they are taken once per process at most,
+ * and leaving them in the wrapper would push a few hundred instructions into twelve of them.
  */
-u32 policy_query(uid_t target)
+void noinline policy_tagless_note(void)
 {
-	const u32 app = uidfake_tag_app();
-
-	if (unlikely(app == 0)) {
-		if (uidfake_tag_pending_here())
-			uidfake_close_pending();
-		else
-			uidfake_warn_untagged();
-		return 0;
-	}
-	if ((u32)target % 100000u == app - 1u)
-		return 0;
-	return policy_lookup_core(target, app - 1u);
+	if (tosya_tag_pending_here())
+		tosya_close_pending();
+	else
+		tosya_warn_untagged();
 }
 
 /*
  * Explicit identity, for the self-check in policy_apply() and for the host
- * test: caller is a uid and the range rules the head path used to apply live
- * here now.
+ * test: caller is a uid, and the range rules are applied here.
  */
 u32 policy_lookup_as(uid_t caller, uid_t target)
 {
@@ -1158,7 +1018,7 @@ u32 policy_lookup_as(uid_t caller, uid_t target)
 	if (off < POLICY_APP_ID_MIN ||
 	    off >= POLICY_APP_ID_MIN + POLICY_APP_ID_SPAN)
 		return 0;
-	return policy_lookup_core(target, off - POLICY_APP_ID_MIN);
+	return policy_lookup_slow(target, off - POLICY_APP_ID_MIN);
 }
 
 static void policy_reset(void)

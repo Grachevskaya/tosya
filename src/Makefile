@@ -1,4 +1,4 @@
-# kbuild fragment for the hma_uidfake module.
+# kbuild fragment for the tosya module.
 #
 # Normally driven by CMake (which runs kbuild inside build/kmi/<kmi>/, a directory
 # holding only symlinks to this source tree), but a manual build works too:
@@ -31,7 +31,7 @@ SP_REG := $(shell grep -l 'register unsigned long current_stack_pointer' $(KSRC)
 # The instruction is rewritten with a plain immediate where that constraint is written that way
 # (see kmi_compat.h); every tree here has it, and none of them needs the header itself.
 KGDB_BRK := $(shell grep -l '"I" (KGDB_COMPILED_DBG_BRK_IMM)' $(KSRC)/arch/arm64/include/asm/kgdb.h 2>/dev/null)
-$(info uidfake: KMI=$(KMI) lse-workaround=$(if $(LSE_HDR),on,off) sp-register=$(if $(SP_REG),on,off) kgdb-brk=$(if $(KGDB_BRK),on,off) lto-kernel=$(if $(CONFIG_LTO_CLANG),on,off))
+$(info tosya: KMI=$(KMI) lse-workaround=$(if $(LSE_HDR),on,off) sp-register=$(if $(SP_REG),on,off) kgdb-brk=$(if $(KGDB_BRK),on,off) lto-kernel=$(if $(CONFIG_LTO_CLANG),on,off))
 
 ifeq ($(KMI),android17-6.18)
 KBUILD_ARGS := M=$(MDIR) MO=$(ODIR)
@@ -39,8 +39,8 @@ else
 KBUILD_ARGS := M=$(MDIR)
 endif
 
-obj-m += hma_uidfake.o
-hma_uidfake-objs := main.o patch.o inline.o inline_entry.o inline_alloc.o status.o tag.o inline_hooks.o \
+obj-m += tosya.o
+tosya-objs := main.o patch.o inline.o inline_entry.o inline_alloc.o status.o tag.o inline_hooks.o \
 	table_hooks.o inode_hook.o hooks.o policy.o lsm.o netlink.o tiers.o
 
 ifeq ($(strip $(LSE_HDR)$(SP_REG)$(KGDB_BRK)),)
@@ -48,10 +48,10 @@ else
 ccflags-y += -include $(MDIR)/include/kmi_compat.h
 endif
 ifneq ($(SP_REG),)
-ccflags-y += -DUIDFAKE_SP_REGISTER
+ccflags-y += -DTOSYA_SP_REGISTER
 endif
 ifneq ($(KGDB_BRK),)
-ccflags-y += -DUIDFAKE_KGDB_BRK
+ccflags-y += -DTOSYA_KGDB_BRK
 endif
 ccflags-y += -I$(MDIR)/include
 ccflags-y += -I$(MDIR)

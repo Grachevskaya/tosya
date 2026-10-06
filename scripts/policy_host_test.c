@@ -7,7 +7,7 @@
 #include <stdio.h>
 
 /* the host never logs anything, but the key has to exist for the linker */
-struct static_key_false uidfake_debug_key;
+struct static_key_false tosya_debug_key;
 
 /* the host has no isolated windows to close */
 
@@ -64,7 +64,7 @@ static void check_sweep(const char *tag, u32 *pairs, u32 np, u32 *callers,
  * The identity the hot path uses is the tag, and the tag is written from the app
  * id inside the uid: a user id is the high part of a uid, so an app of a secondary
  * user (100000 + app) must be named like any other -- read as a whole number it is
- * past UF_ISOLATED_START and would never be tagged at all, which is a user whose
+ * past TOSYA_ISOLATED_START and would never be tagged at all, which is a user whose
  * apps are hidden by nothing. A caller==0 pair hides the target from every caller,
  * including one that has no rules of its own.
  */
@@ -78,16 +78,16 @@ static void check_tag_path(void)
 	policy_apply(pairs, 2);
 
 	fake_current.thread_info.flags = 0;
-	uidfake_tag_adopt(0, 10123);
-	tag = uidfake_tag_app();
+	tosya_tag_adopt(0, 10123);
+	tag = tosya_tag_app();
 	hidden = policy_query(10456);
 	printf("%-22s tag=%-4u hidden=%u\n", "tag: owner", tag, hidden);
 	if (tag != 124 || !hidden)
 		g_fail = 1;
 
 	fake_current.thread_info.flags = 0;
-	uidfake_tag_adopt(0, 110123);
-	tag = uidfake_tag_app();
+	tosya_tag_adopt(0, 110123);
+	tag = tosya_tag_app();
 	hidden = policy_query(110456);
 	printf("%-22s tag=%-4u hidden=%u\n", "tag: secondary user", tag,
 	       hidden);
@@ -97,22 +97,22 @@ static void check_tag_path(void)
 	/* A system uid of a secondary user (100000 + 1000) is not an app, and an
 	 * isolated uid is not one either. */
 	fake_current.thread_info.flags = 0;
-	uidfake_tag_adopt(0, 101000);
-	if (uidfake_tag_app() != 0) {
+	tosya_tag_adopt(0, 101000);
+	if (tosya_tag_app() != 0) {
 		printf("%-22s tagged as an app\n", "tag: user system uid");
 		g_fail = 1;
 	}
 	fake_current.thread_info.flags = 0;
-	uidfake_tag_adopt(0, 90042);
-	if (uidfake_tag_app() != 0) {
+	tosya_tag_adopt(0, 90042);
+	if (tosya_tag_app() != 0) {
 		printf("%-22s tagged as an app\n", "tag: isolated uid");
 		g_fail = 1;
 	}
 
 	policy_apply(wild, 1);
 	fake_current.thread_info.flags = 0;
-	uidfake_tag_adopt(0, 10376);
-	tag = uidfake_tag_app();
+	tosya_tag_adopt(0, 10376);
+	tag = tosya_tag_app();
 	hidden = policy_query(10456);
 	printf("%-22s tag=%-4u hidden=%u\n", "tag: wildcard caller", tag,
 	       hidden);
@@ -177,7 +177,7 @@ int main(void)
 	static u32 pairs[7 * 19 * 2];
 	u32 i, j, w = 0;
 	static u32 big[4000 * 2];
-	/* A policy from the field: more pairs than the old 4096 ceiling. */
+	/* A policy larger than the 4096-pair ceiling the layout is sized against. */
 	static u32 kHugePairs = 24000;
 	static u32 huge[24000 * 2];
 	static u32 hugec[600];

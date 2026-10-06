@@ -4,7 +4,7 @@
 #include <errno.h> /* tiers.c returns -ENOENT and -ENODEV */
 #include <stdbool.h>
 
-bool uidfake_inline_active(void)
+bool tosya_inline_active(void)
 {
 	return false;
 }
@@ -41,7 +41,7 @@ static void want_log(const char *expect)
 
 static void want_name(const char *family, const char *expect)
 {
-	const char *got = uf_tier_name(family);
+	const char *got = tosya_tier_name(family);
 
 	if (!expect) {
 		want(got == NULL, "no mechanism is in place");
@@ -55,7 +55,7 @@ static void end_case(const char *name)
 	printf("tiers: %s %s\n", name, g_case_fail ? "FAIL" : "PASS");
 	g_total_fail += g_case_fail;
 	g_case_fail = 0;
-	uf_tier_revert_all();
+	tosya_tier_revert_all();
 	g_log_n = 0;
 	g_log[0] = 0;
 }
@@ -148,24 +148,28 @@ static void rem_h(void)
 	g_fh.removes++;
 }
 
-static const struct uf_tier t_a = { UF_TIER_UID, "a",	 "fake a",
-				    10,		 inst_a, rem_a };
-static const struct uf_tier t_b = { UF_TIER_UID, "b",	 "fake b",
-				    20,		 inst_b, rem_b };
-static const struct uf_tier t_c = { UF_TIER_UID, "c",	 "fake c",
-				    30,		 inst_c, rem_c };
-static const struct uf_tier t_d = { UF_TIER_SETUID, "d",  "fake d", 10,
-				    inst_d,	    rem_d };
-static const struct uf_tier t_e = { UF_TIER_SETUID, "e",  "fake e", 20,
-				    inst_e,	    rem_e };
-static const struct uf_tier t_f = { UF_TIER_SETUID, "f",  "fake f", 30,
-				    inst_f,	    rem_f };
-static const struct uf_tier t_g = { UF_TIER_UID, "g",	 "fake g",
-				    40,		 inst_g, rem_g };
-static const struct uf_tier t_h = { UF_TIER_SETUID, "h",  "fake h", 40,
-				    inst_h,	    rem_h };
+static const struct tosya_tier t_a = { TOSYA_TIER_UID, "a",  "fake a", 10,
+				       inst_a,	       rem_a };
+static const struct tosya_tier t_b = { TOSYA_TIER_UID, "b",  "fake b", 20,
+				       inst_b,	       rem_b };
+static const struct tosya_tier t_c = { TOSYA_TIER_UID, "c",  "fake c", 30,
+				       inst_c,	       rem_c };
+static const struct tosya_tier t_d = {
+	TOSYA_TIER_SETUID, "d", "fake d", 10, inst_d, rem_d
+};
+static const struct tosya_tier t_e = {
+	TOSYA_TIER_SETUID, "e", "fake e", 20, inst_e, rem_e
+};
+static const struct tosya_tier t_f = {
+	TOSYA_TIER_SETUID, "f", "fake f", 30, inst_f, rem_f
+};
+static const struct tosya_tier t_g = { TOSYA_TIER_UID, "g",  "fake g", 40,
+				       inst_g,	       rem_g };
+static const struct tosya_tier t_h = {
+	TOSYA_TIER_SETUID, "h", "fake h", 40, inst_h, rem_h
+};
 
-static const struct uf_tier *const g_table[] = {
+static const struct tosya_tier *const g_table[] = {
 	&t_a, &t_b, &t_c, &t_d, &t_e, &t_f, &t_g, &t_h,
 };
 
@@ -184,82 +188,86 @@ static void reset_fakes(void)
 
 int main(void)
 {
-	uf_tier_set_table(g_table, ARRAY_SIZE(g_table));
+	tosya_tier_set_table(g_table, ARRAY_SIZE(g_table));
 
 	/* 1. The lowest order that installs wins, after the ones before it failed. */
 	reset_fakes();
 	g_fa.rc = -ENOENT;
 	g_fb.rc = -EINVAL;
-	want(uf_tier_install(UF_TIER_UID, NULL) == 0, "install returns 0");
-	want_name(UF_TIER_UID, "fake c");
+	want(tosya_tier_install(TOSYA_TIER_UID, NULL) == 0,
+	     "install returns 0");
+	want_name(TOSYA_TIER_UID, "fake c");
 	want_log("abc");
 	end_case("order");
 
 	/* 2. A family install never touches another family's mechanisms. */
 	reset_fakes();
-	want(uf_tier_install(UF_TIER_UID, NULL) == 0, "install uid");
-	want(uf_tier_install(UF_TIER_SETUID, NULL) == 0, "install setuid");
+	want(tosya_tier_install(TOSYA_TIER_UID, NULL) == 0, "install uid");
+	want(tosya_tier_install(TOSYA_TIER_SETUID, NULL) == 0,
+	     "install setuid");
 	want_log("abcd");
 	end_case("isolation");
 
 	reset_fakes();
 	g_fb.rc = 0; /* b is the one this case asks for, so it has to work */
-	want(uf_tier_install(UF_TIER_UID, "b") == 0, "forced b installs");
+	want(tosya_tier_install(TOSYA_TIER_UID, "b") == 0, "forced b installs");
 	want_log("b");
-	want_name(UF_TIER_UID, "fake b");
+	want_name(TOSYA_TIER_UID, "fake b");
 	end_case("forced");
 
 	reset_fakes();
-	want(uf_tier_install(UF_TIER_UID, "a") != 0,
+	want(tosya_tier_install(TOSYA_TIER_UID, "a") != 0,
 	     "forced failure is returned");
 	want_log("a");
-	want_name(UF_TIER_UID, NULL);
+	want_name(TOSYA_TIER_UID, NULL);
 	end_case("forced-failure");
 
 	reset_fakes();
-	want(uf_tier_install(UF_TIER_UID, "nope") != 0, "unknown key refused");
+	want(tosya_tier_install(TOSYA_TIER_UID, "nope") != 0,
+	     "unknown key refused");
 	want_log("");
-	want_name(UF_TIER_UID, NULL);
+	want_name(TOSYA_TIER_UID, NULL);
 	end_case("forced-unknown");
 
 	reset_fakes();
 	g_fd.rc = -EOPNOTSUPP;
-	want(uf_tier_install(UF_TIER_SETUID, NULL) == 0, "install");
+	want(tosya_tier_install(TOSYA_TIER_SETUID, NULL) == 0, "install");
 	want_log("def");
-	want_name(UF_TIER_SETUID, "fake f");
+	want_name(TOSYA_TIER_SETUID, "fake f");
 	end_case("fallthrough");
 
 	reset_fakes();
-	want(uf_tier_install(UF_TIER_UID, NULL) == 0, "install uid");
-	want(uf_tier_install(UF_TIER_SETUID, NULL) == 0, "install setuid");
+	want(tosya_tier_install(TOSYA_TIER_UID, NULL) == 0, "install uid");
+	want(tosya_tier_install(TOSYA_TIER_SETUID, NULL) == 0,
+	     "install setuid");
 	g_log_n = 0;
 	g_log[0] = 0;
-	uf_tier_revert(UF_TIER_UID);
+	tosya_tier_revert(TOSYA_TIER_UID);
 	want_log("C");
 	want(g_fc.removes == 1 && g_fd.removes == 0,
 	     "only the uid one came back");
-	uf_tier_revert(UF_TIER_SETUID);
+	tosya_tier_revert(TOSYA_TIER_SETUID);
 	want_log("CD");
 	want(g_fd.removes == 1, "the setuid one came back");
 	end_case("revert");
 
 	reset_fakes();
-	want(uf_tier_install(UF_TIER_UID, "g") == 0, "install g");
-	want(uf_tier_install(UF_TIER_SETUID, "h") == 0, "install h");
+	want(tosya_tier_install(TOSYA_TIER_UID, "g") == 0, "install g");
+	want(tosya_tier_install(TOSYA_TIER_SETUID, "h") == 0, "install h");
 	g_log_n = 0;
 	g_log[0] = 0;
-	uf_tier_revert_all();
+	tosya_tier_revert_all();
 	want_log("HG");
 	want(g_fg.removes == 1 && g_fh.removes == 1, "both came back");
 	g_log_n = 0;
 	g_log[0] = 0;
-	uf_tier_revert_all(); /* nothing installed: a no-op, not a second remove */
+	tosya_tier_revert_all(); /* nothing installed: a no-op, not a second remove */
 	want_log("");
 	end_case("revert-all");
 
 	/* 8. A family nobody answers stays unanswered and says so. */
 	reset_fakes();
-	want(uf_tier_install("nope", NULL) != 0, "unknown family refused");
+	want(tosya_tier_install("nope", NULL) != 0, "unknown family refused");
 	want_log("");
 	want_name("nope", NULL);
 	end_case("unknown-family");

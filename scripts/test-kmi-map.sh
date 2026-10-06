@@ -10,8 +10,8 @@ cd "$(dirname "$0")/.."
 stage=build/kmi-map
 rm -rf "$stage"
 mkdir -p "$stage/ko"
-for kmi in $(ls build/ko 2>/dev/null | sed 's/_arm64_hma_uidfake\.ko$//' | sort -u); do
-  : >"$stage/ko/${kmi}_arm64_hma_uidfake.ko"
+for kmi in $(ls build/ko 2>/dev/null | sed 's/_arm64_tosya\.ko$//' | sort -u); do
+  : >"$stage/ko/${kmi}_arm64_tosya.ko"
 done
 if [ -z "$(ls -A "$stage/ko")" ]; then
   echo "FAIL: build/ko is empty; build the modules first"
@@ -28,7 +28,7 @@ check() {
   CASE=$1 desired=$2
   got=$(kmi_from_uname)
   [ "$got" = "$desired" ] || { echo "FAIL $CASE -> '$got', wanted '$desired'"; fail=1; return; }
-  if [ -f "$stage/ko/${got}_arm64_hma_uidfake.ko" ]; then
+  if [ -f "$stage/ko/${got}_arm64_tosya.ko" ]; then
     echo "ok   $CASE -> $got (in the zip)"
   else
     echo "ok   $CASE -> $got (not built; the installer reports it instead of loading another)"

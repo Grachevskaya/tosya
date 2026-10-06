@@ -40,7 +40,7 @@ the table above is checked on a device -- a forced run tries only what it names,
 is reported rather than quietly replaced:
 
 ```
-/data/adb/ksud insmod /data/local/tmp/hma_uidfake.ko 'uid_tier=inline setuid_tier=inline'
+/data/adb/ksud insmod /data/local/tmp/tosya.ko 'uid_tier=inline setuid_tier=inline'
 ```
 
 With both inline tiers selected successfully, neither family changes syscall table entries. Auto
@@ -81,6 +81,14 @@ The registry remains an explicit table: module linker sections cannot rely on Kb
 providing `__start_`/`__stop_` symbols.
 
 ## Queries
+
+The USER lookups answer as if the uid did not exist:
+
+```
+getpriority(PRIO_USER, uid)       -> -ESRCH
+ioprio_get(IOPRIO_WHO_USER, uid)  -> -ESRCH
+setpriority / ioprio_set         -> -ESRCH when the request reaches USER lookup
+```
 
 The USER branches of `getpriority`, `setpriority`, `ioprio_get`, and `ioprio_set` use `find_user()`
 to look up an existing `user_struct`. The inline hook first calls `policy_query`, then selects either
@@ -163,29 +171,20 @@ An isolated process gets its uid at birth and nothing else says which app it cam
    still using it. At unload each file is found again from the path it was registered with. The app
    id is taken from inside the uid (`uid % 100000`), because a user id is the high part of it: read
    as a whole number, an app of a secondary user looks like an isolated uid and would never be named.
-4. **Before the module loads.** `uidfake_tag_prime()` derives the same tag for every running task
+4. **Before the module loads.** `tosya_tag_prime()` derives the same tag for every running task
    from its uid. A successful inline installation stays loaded until reboot.
 
 ## Policy and APK synchronization
 
-`sync-tool` watches HMA/HMA-OSS configuration, APK paths, PackageManager commits and Android user
-changes before its first synchronization attempt. It expands rules for the current packages and
-users and sends them through staged netlink. A readable empty configuration clears policy; a
-missing or unreadable configuration preserves it and schedules a retry. Direct system-APK paths
-and directories containing `base.apk` are supported. APK registration includes applications without
-rules so their isolated children can be identified; policy callers take priority at the size limit.
+The kernel half takes two blobs over its netlink family and nothing else: the (caller, target) policy,
+and the APK paths whose inodes are named after the package a process was born from. Whoever produces
+them is the userspace half, and this repository does not ship one: the two blobs and the shapes in
+`kaux.h` are the whole contract, and a device that never pushes them is a device that hides nothing.
 
-APK messages are deltas. A device/inode ledger records each entry as `Adding`, `Confirmed` or
-`Dropping`, accounting for operations whose replies may be lost. Removals and same-inode UID
-changes must be acknowledged before replacement adds. An add batch is confirmed only when status
-reports the expected count and zero failures; uncertain additions are retried individually. This
-keeps a partial failure from repeatedly retiring successful replacements. An unreachable peer
-arms a retry. `sync-tool --once` fails when policy or APK synchronization remains incomplete.
-
-The ledger is not persistent or a kernel inventory: a daemon restart cannot recover every installed
-record. Userspace `stat()` can race the kernel's path resolution during package replacement, and
-status describes the latest apply, so reconciliation assumes one writer. Retired inode shadows
-remain allocated until reboot on the pinned inline path.
+A readable, empty policy clears it; a policy that does not fit, or a caller that is not an app uid, is
+refused and the previous one stays in force. APK messages are deltas with an add/confirm/drop ledger, so
+a lost reply cannot leave a shadow nobody retires; an add batch is confirmed only when the status reports
+ the expected count and zero failures, and uncertain additions are retried one by one.
 
 ## Patch writes
 
@@ -194,7 +193,7 @@ locking and instruction-cache maintenance. Trampolines are populated and checked
 a failure leaves only unreachable scratch code. This path does not walk `init_mm` using the
 module's structure layout.
 
-Entry publication uses `uidfake_patch_insn`: validate the aligned kernel-text address, stop all
+Entry publication uses `tosya_patch_insn`: validate the aligned kernel-text address, stop all
 online CPUs, compare the expected instruction, and write exactly one replacement word through the
 native helper. Cache maintenance finishes while CPUs remain stopped, and every participating CPU
 executes ISB before resuming. In the checked ARM64 ACK implementations the helper's four-byte
@@ -216,7 +215,7 @@ not the single-instruction transaction API and must not be used for inline entry
 Diagnostics sit behind a static key (jump label): with the key off the branch is a NOP.
 
 ```
-/data/adb/ksud insmod /data/local/tmp/hma_uidfake.ko debug=1
+/data/adb/ksud insmod /data/local/tmp/tosya.ko debug=1
 ```
 
 What the module is doing is also readable where a user looks: `KAUX_CMD_STATUS` answers with the
@@ -227,7 +226,7 @@ setters", empty when nothing installed there), the geometry this module was buil
 failure. One name per family, written by the runner from the registry, is what makes that line
 answerable: the two used to report through different schemes, and the inline path filled the LSM
 field with the bare function name, so "inline cap_task_fix_setuid" and the LSM hook behind it read
-the same. `sync-tool` reads it and writes the one-line summary into the module description,
+the same. The userspace half reads it and can write the one-line summary into the module description,
 which is where KernelSU and Magisk show a module's state, and compares the module's geometry against
 the running kernel's config (`/proc/config.gz`).
 
@@ -247,7 +246,7 @@ the running kernel's config (`/proc/config.gz`).
   That check is a snapshot, so the inline path must retain its live-replacement collision guard.
 - The inline entry accepts a normal function argument and does not rewrite syscall `pt_regs`.
 - The kernel only compares numbers; whatever needs a path, a package name or JSON happens in
-  `sync-tool`, and what arrives is checked for shape and size.
+  the userspace half, and what arrives is checked for shape and size.
 - A rejected update changes nothing: a policy that does not fit, a caller that is not an app uid, a
   group larger than the tables -- each is logged and the previous policy stays in force, because
   half a policy is the state that leaks.
@@ -256,8 +255,8 @@ the running kernel's config (`/proc/config.gz`).
 
 - The netlink family is `GENL_ADMIN_PERM`: only root can push a policy, both blobs are
   length-checked before they are parsed, and nothing is copied back out except the status.
-- HMA's `config.json` decides who is hidden and belongs to HMA's uid; `sync-tool` reads nothing an
-  app can write.
+- Nothing the kernel reads comes from a place an app can write: both blobs arrive over a family that
+  requires CAP_NET_ADMIN, and the kernel keeps no path or package name of its own.
 - The tag still uses bits 40..53 of `thread_info.flags` and pending bit 55. Removing syscall hooks
   does not remove this shared-field dependency or reserve these bits against other kernel modules.
 - The hooked syscalls take at most three arguments, which is what the register object they receive
@@ -268,7 +267,7 @@ the running kernel's config (`/proc/config.gz`).
 ## Protocol
 
 Little endian, defined once in `include/kaux.h`, which the module and the tool both include. The
-family is named after the module, `hma_uidfake`, because generic netlink families share one
+family is named after the module, `tosya`, because generic netlink families share one
 namespace: a generic name could be taken by another module, and the tool resolves the family by name,
 so it would then be talking to that module. The family version is 4 and the kernel rejects a request
 that does not carry it, so a helper and a module of different versions cannot read each other's
@@ -293,6 +292,6 @@ reader that is not looking at the structure it was built for says so instead of 
 |---|---|
 | `(caller, target)` pairs | 65536 |
 | callers | 4096 |
-| code dirs (`UF_APK_MAX`) | 10000 |
+| code dirs (`TOSYA_APK_MAX`) | 10000 |
 | netlink blob (`KAUX_STAGED_BYTES`) | 2 MiB |
 | netlink message (`MAX_BLOB_BYTES`) | 32 KiB |

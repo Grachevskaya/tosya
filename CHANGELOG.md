@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.5.0
+
+- The rename reaches everything it had left behind: include guards, host-test macros, the compiler
+  flags in `src/Makefile`, the CMake variables and the CI, and the references to a tool this tree no
+  longer holds now name the userspace half. Clang-tidy runs over the built module for the first time
+  and found a real fault: the return of `tosya_inline_trampoline()` was stored and never checked, so a
+  trampoline that failed to build would have been published.
+
+- The module no longer carries a userspace half. `src/tools` is gone except `uidbench`, the timing
+  instrument; the policy and the APK paths arrive over the same netlink family they always did, and a
+  device that never pushes them hides nothing -- which is the honest state of a kernel half with no
+  caller. A program that speaks those two blobs can live anywhere, and the package is a module zip with
+  the ko files, the loader and the boot scripts.
+
+- The policy query's fast half is inlined into the hooked wrappers and the walk stays out of line. A
+  caller with no rules of its own is answered without a call, a frame or a second pointer: the snapshot
+  the walk uses keeps its hot words first, so one RCU dereference serves both halves. Measured on
+  android14-6.1: a hooked call went from a call into a 167-instruction function to about thirty inlined
+  instructions, and the module got 264 bytes smaller.
+
+- Nothing a build produces is published. A tag run reserves one message in the chat and builds every ko
+  in parallel, each inside the image its kernel family is built in; every job hands its ko to that chat,
+  because between jobs a public repository has no private channel -- an artifact or a cache can be
+  downloaded by anyone who can read it. A second workflow, triggered when the build run finishes,
+  collects those ko files, packs the module and writes it into the ninth line of the same message,
+  taking the transport messages away again. Nothing is uploaded and nothing is relayed, so a compiled
+  module exists only where it was sent. `module.prop` carries the identity the rest of the tree carries
+  and no update URL, and the formatting check runs inside those same images, because a bare runner
+  disagrees with them about the spacing clang-format writes inside braces.
+
+- The module, its netlink family, its module parameters and every artifact are `tosya`. The KernelSU id
+  changes with them, so an install of the old id is replaced rather than upgraded, and the tool and the
+  module have to come from the same build. `KAUX_FAMILY_VERSION` is 5: the family name is how the tool
+  finds the module and how the module recognises the tool, so a mismatch is a refusal in the open rather
+  than two ends reading each other's command ids.
+
 ## 0.4.0
 
 - Every hook mechanism is its own file, and which one is in place is a registry rather than a chain
@@ -8,7 +44,7 @@
   one installs. The inline mechanism comes first for both: the uid queries are answered at
   `find_user()`, and the id change at `cap_task_fix_setuid()`, which the kernel hands both creds. The
   LSM hook and the syscall tables are the mechanisms behind them, and the order is data: moving one is
-  a single number. `uidfake.setuid_tier=` and `uidfake.uid_tier=` force one mechanism, which tries
+  a single number. `tosya.setuid_tier=` and `tosya.uid_tier=` force one mechanism, which tries
   only what it names, so a device can show each of them working on its own.
 
 - The inline mechanism is a short entry trampoline, not a copy of the function. One aligned four-byte
@@ -43,7 +79,7 @@
   the inline path wrote the bare function name into the LSM field, so a device could not tell the
   inline hook from the LSM hook it replaced.
 
-- The netlink family is `hma_uidfake`, not the generic `kaux`, and the family version is 4. Generic
+- The netlink family is `tosya`, not the generic `kaux`, and the family version is 4. Generic
   netlink families share one namespace and the tool resolves its family by name, so a generic name
   taken by another module would have left this one without a family of its own and pointed the tool at
   that other module. The version moved from 3 because the status structure changed size when the

@@ -1,27 +1,68 @@
-# HMA UID Fake
+# Tosya
 
-KernelSU module that makes the uid of an app hidden by HMA (or HMA-OSS) answer as if it did
-not exist:
+> *Тося*
 
-```
-getpriority(PRIO_USER, uid)       -> -ESRCH
-ioprio_get(IOPRIO_WHO_USER, uid)  -> -ESRCH
-setpriority / ioprio_set         -> -ESRCH when the request reaches USER lookup
-```
+*This article is a stub. You can help the Z.A.T.O Wiki by expanding it.*
 
-Which rules apply follows the app a process was born from, not the uid it holds when it calls, so an
-isolated child or anything that called `setuid()` answers the same way.
+| | |
+|---|---|
+| **Full name** | Tosya (Тося) |
+| **Gender** | Female |
+| **Status** | Deceased |
+| **Hair** | Ear-length light grey, straight-cut bangs |
+| **Eyes** | Light green, red pupils |
+| **Wears** | School uniform, black apron, red pin |
+| **Nature** | Unresolved |
 
-The preferred path hooks `find_user` and the setuid capability callback using
-the running kernel's entry instructions, leaving both syscall tables untouched.
-Unsupported kernels can fall back to LSM/syscall hooks; module status identifies
-the mechanism installed.
+**Tosya** is a character in Ferry/nopanamaman's visual novel, *Z.A.T.O // I Love the World and Everything In It*.
 
-Install the module zip with KernelSU. Boot loading prefers `/data/adb/ksud insmod`
-when available, otherwise the bundled loader. A published inline hook remains
-loaded until reboot.
+## Appearance
 
-See [design](docs/design.md) for hook behavior and compatibility limits,
-and [build instructions](docs/build.md) for packaging and loading.
+Tosya has short ear-length light grey hair, with chin-length strands framing her face and straight cut
+bangs down to just above her eyes. Her eyes are light green, with red pupils.
 
-GPL-2.0, see [LICENSE](LICENSE).
+She wears the school uniform, which consists of a long-sleeved knee-length brown dress with a white
+lace trim along the bottom, and a plain white collar with a small white bow tied just underneath. A
+black apron with a large pocket is worn over top, a small red pin -- presumably a Komsomol's pin -- on
+the right side. Black pants are worn underneath. Over top, she wears a knee-length white button-up
+jacket.
+
+## Background
+
+Tosya is either an independent being created through the Code, or a manifestation of Asya's psyche.
+The game leaves the question open on purpose, and nothing about her seen from the outside tells the two
+apart: she is only ever herself in the answers she gives.
+
+*TBA*
+
+## Personality
+
+In the ending, Tosya displays expressions, poses, and mannerisms reminiscent of Marina, Ira, and Vadim.
+In the DLC, Ferry states that "Tosya holds similar poses to Vadim and Ira, while some of her expressions
+copy Marina's," suggesting that Tosya's personality incorporates traits of Asya's friends.
+
+## Relationships
+
+### Asya
+
+Asya is Tosya's closest companion and the person she loves most. Tosya regards Asya as her best friend
+and devotes herself to supporting and protecting her. Depending on the interpretation of the game's
+ending, Tosya is either an independent being created through the Code or a manifestation of Asya's
+psyche, making their relationship one of deep emotional dependence and mutual affection. The game
+intentionally leaves Tosya's true nature ambiguous.
+
+## Trivia
+
+*TBA*
+
+## See also
+
+* [Tosya](https://zato.fandom.com/wiki/Tosya) on the Z.A.T.O Wiki -- appearances, sprites, and the rest of the cast
+* [The Code](docs/design.md) -- what she is made of
+* [Putting her together](docs/build.md) -- how she is assembled, and how she is let out
+* [LICENSE](LICENSE) -- GPL-2.0
+
+----
+
+Article text adapted from the [Z.A.T.O Wiki](https://zato.fandom.com/wiki/Tosya) (CC BY-SA), where
+she comes from in the first place.

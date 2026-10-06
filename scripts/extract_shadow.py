@@ -9,10 +9,10 @@ anything when the markers or the pieces they are supposed to contain are gone.
 import pathlib
 import sys
 
-BEGIN = "/* UF_SHADOW_BEGIN"
-END = "/* UF_SHADOW_END */"
-NEEDED = ("uf_shadow_open", "shadow_owner", "shadow_replace", "shadow_drop_id",
-          "igrab(", "kstrdup(", "fops.owner", "uidfake_apk_remove")
+BEGIN = "/* TOSYA_SHADOW_BEGIN"
+END = "/* TOSYA_SHADOW_END */"
+NEEDED = ("tosya_shadow_open", "shadow_owner", "shadow_replace", "shadow_drop_id",
+          "igrab(", "kstrdup(", "fops.owner", "tosya_apk_remove")
 
 
 def main() -> int:

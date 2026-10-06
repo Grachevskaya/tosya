@@ -1,12 +1,8 @@
 # Build
 
-Use Linux with CMake 3.22+, GNU make, Python 3, an Android NDK, and the matching
-DDK kernel tree/compiler for each KMI. Install `nlohmann-json3-dev` and `zlib1g-dev`
-for the userspace helper. Initialize the pinned loader before configuring:
-
-```sh
-git submodule update --init --recursive
-```
+Use Linux with CMake 3.22+, GNU make, Python 3, and the matching DDK kernel tree and compiler
+for each KMI. The optional measurement tool below is the one thing in this tree that wants an
+Android NDK.
 
 Each KMI builds with its DDK compiler so that Clang CFI and shadow call stack
 instrumentation match. Kbuild links the module and writes its objects into
@@ -17,19 +13,22 @@ instrumentation match. Kbuild links the module and writes its objects into
 With all default DDKs under `/opt/ddk`:
 
 ```sh
-export ANDROID_NDK_HOME=/absolute/path/to/android-ndk
-cmake -S . -B build -DUG_NDK="$ANDROID_NDK_HOME" -DDDK_ROOT=/opt/ddk
+cmake -S . -B build -DDDK_ROOT=/opt/ddk
 cmake --build build -j8
 ```
 
-The default KMIs are android14-6.1, android15-6.6, android16-6.12 and android17-6.18.
-`-DUG_ENABLE_5X=ON` adds the four legacy 5.x KMIs when their DDK trees are present.
-Modules go to `build/ko`; the installable zip goes to `build/dist`. The package
-also contains `sync-tool`, the pinned `external/lkmloader`, and the boot scripts.
+Every KMI is built: android12-5.10, android13-5.10, android13-5.15, android14-5.15,
+android14-6.1, android15-6.6, android16-6.12 and android17-6.18. The 5.x four used to sit
+behind an option that was off by default; the guard that answers the reason for that is in
+`src/patch.c`, and keeping them out of the build only meant they were never built.
 
-Version metadata comes from git, falling back to `module/module.prop` for source
-exports. `-DUG_VERSION_OVERRIDE=0.4.0-dev+local -DUG_VERSION_CODE_OVERRIDE=4000`
-sets explicit metadata without changing tags or module attribution.
+Modules go to `build/ko`, and that is all this tree produces: there is no package, no
+userspace loader and no boot script here any more. The repository with the userspace half
+packages these modules and loads them.
+
+There is no version metadata in this tree. The tag lookup and the versionCode arithmetic that
+used to name the package, and the git plumbing that fed them, went with the packaging: the
+module's version is the one the repository that packages it carries.
 
 ## Separate KMI builds
 
@@ -37,6 +36,10 @@ For environments with one DDK each, CMake and CI share `scripts/build-kmi.sh`:
 
 | KMI | DDK compiler |
 | --- | --- |
+| android12-5.10 | clang-r416183b |
+| android13-5.10 | clang-r450784e |
+| android13-5.15 | clang-r450784e |
+| android14-5.15 | clang-r487747c |
 | android14-6.1 | clang-r487747c |
 | android15-6.6 | clang-r510928 |
 | android16-6.12 | clang-r536225 |
@@ -45,33 +48,32 @@ For environments with one DDK each, CMake and CI share `scripts/build-kmi.sh`:
 For example, run this inside the 6.1 build environment:
 
 ```sh
-UG_KBUILD_JOBS=8 bash scripts/build-kmi.sh \
+TOSYA_KBUILD_JOBS=8 bash scripts/build-kmi.sh \
   android14-6.1 clang-r487747c \
-  build/kmi/android14-6.1 build/ko/android14-6.1_arm64_hma_uidfake.ko
+  build/kmi/android14-6.1 build/ko/android14-6.1_arm64_tosya.ko
 ```
 
 Collect the desired modules in `build/ko`, then package them with the NDK:
 
 ```sh
-cmake -S . -B build -DUG_NDK="$ANDROID_NDK_HOME" -DUG_USE_PREBUILT_KO=ON
+cmake -S . -B build -DTOSYA_USE_PREBUILT_KO=ON
 cmake --build build -j8
 ```
 
 Prebuilt mode packages the files present in `build/ko`; keep that directory limited
-to the intended candidate. `UG_DEBUG=ON` enables permanent kernel diagnostics.
+to the intended candidate. `TOSYA_DEBUG=ON` enables permanent kernel diagnostics.
 Normal packages leave it off; the `debug=1` module parameter enables them for 60 seconds.
 
 ## Loading
 
 Install the zip through KernelSU and reboot. `customize.sh` selects the matching
-KMI. `post-fs-data.sh` loads early; `service.sh` retries if needed and starts
-`sync-tool`. Both prefer `/data/adb/ksud insmod` and use the bundled loader only
+KMI. `post-fs-data.sh` loads early; `service.sh` retries if needed . Both prefer `/data/adb/ksud insmod` and use the bundled loader only
 when ksud is absent. Logs are in the installed module's `state/sync.log`.
 
 For manual loading from a root shell on a boot without this module active:
 
 ```sh
-/data/adb/ksud insmod /data/local/tmp/hma_uidfake.ko 'uid_tier=inline setuid_tier=inline'
+/data/adb/ksud insmod /data/local/tmp/tosya.ko 'uid_tier=inline setuid_tier=inline'
 ```
 
 Forcing the inline tiers disables fallback for that attempt. Normal package loading

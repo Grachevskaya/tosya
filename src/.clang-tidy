@@ -26,5 +26,5 @@ Checks: >-
   -clang-analyzer-unix.Malloc,
   -clang-analyzer-core.UndefinedBinaryOperatorResult,
   -clang-analyzer-core.BitwiseShift
-HeaderFilterRegex: '.*/hma-uidfake/src/.*'
+HeaderFilterRegex: '.*/tosya/src/.*'
 WarningsAsErrors: ''

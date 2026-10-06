@@ -1,8 +1,0 @@
-id=hma-uidfake
-name=HMA UID Fake
-# Fallback only: the build replaces these two with the git tag and the short hash.
-version=0.1.0
-versionCode=1000
-author=Kodatemitsuru
-description=Fake UID for apps that are "risk", so that they can not be detected by uid scanners. This module is for advanced users only, and it may cause issues with some apps. Use at your own risk.
-updateJson=https://github.com/KodateMitsuru/hma-uidfake/releases/latest/download/update.json

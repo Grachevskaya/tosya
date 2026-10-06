@@ -29,11 +29,11 @@ if [ "$kmi" = android17-6.18 ]; then
   args+=("MO=$stage")
 fi
 if [ "$debug" = 1 ]; then
-  args+=(KCFLAGS=-DUF_DEBUG_ALWAYS=1)
+  args+=(KCFLAGS=-DTOSYA_DEBUG_ALWAYS=1)
 fi
-if [ -n "${UG_KBUILD_JOBS:-}" ]; then
-  args+=("-j$UG_KBUILD_JOBS")
+if [ -n "${TOSYA_KBUILD_JOBS:-}" ]; then
+  args+=("-j$TOSYA_KBUILD_JOBS")
 fi
-PATH="$clang_bin:$PATH" "${UG_KBUILD_MAKE:-make}" "${args[@]}" modules
-"$clang_bin/llvm-strip" -d "$stage/hma_uidfake.ko"
-cp "$stage/hma_uidfake.ko" "$output"
+PATH="$clang_bin:$PATH" "${TOSYA_KBUILD_MAKE:-make}" "${args[@]}" modules
+"$clang_bin/llvm-strip" -d "$stage/tosya.ko"
+cp "$stage/tosya.ko" "$output"

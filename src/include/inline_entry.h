@@ -3,20 +3,20 @@
 
 #include "inline.h"
 
-/* One or two displaced instructions and a direct branch to the native body. */
-#define UF_INLINE_TRAMPOLINE_MAX 12u
+// One or two displaced instructions and a direct branch to the native body.
+#define TOSYA_INLINE_TRAMPOLINE_MAX 12u
 
 /* Private veneers entered at an ABI function boundary may clobber IP0/x16.
  * The 16-byte form is reached only by a direct BL. The 24-byte form has a
  * BTI jc landing; both keep the 64-bit target literal eight-byte aligned when
  * the caller places the veneer at an eight-byte-aligned address.
  */
-#define UF_INLINE_VENEER_SIZE 16u
-#define UF_INLINE_LANDING_VENEER_SIZE 24u
-#define UF_INLINE_ISLAND_TRAMPOLINE 32u
-#define UF_INLINE_ISLAND_SIZE 48u
-int uf_inline_veneer(void *out, size_t out_size, unsigned long target,
-		     int landing);
+#define TOSYA_INLINE_VENEER_SIZE 16u
+#define TOSYA_INLINE_LANDING_VENEER_SIZE 24u
+#define TOSYA_INLINE_ISLAND_TRAMPOLINE 32u
+#define TOSYA_INLINE_ISLAND_SIZE 48u
+int tosya_inline_veneer(void *out, size_t out_size, unsigned long target,
+			int landing);
 
 /*
  * Build an original-call trampoline from the running function. @len is its
@@ -35,6 +35,6 @@ int uf_inline_veneer(void *out, size_t out_size, unsigned long target,
  * Source/destination buffers must be disjoint and four-byte aligned. Output is
  * untouched on failure and @out_len is zero. All checks precede publication.
  */
-int uf_inline_trampoline(void *out, size_t out_size, const void *from,
-			 unsigned long from_va, unsigned long to_va, size_t len,
-			 size_t patch_offset, size_t *out_len);
+int tosya_inline_trampoline(void *out, size_t out_size, const void *from,
+			    unsigned long from_va, unsigned long to_va,
+			    size_t len, size_t patch_offset, size_t *out_len);

@@ -9,17 +9,17 @@
 #include <linux/user.h>
 #include <linux/version.h>
 
-#include "uidfake.h"
+#include "tosya.h"
 #include "kaux.h"
 
 static struct kaux_status g_status = {
 	.magic = KAUX_STATUS_MAGIC,
 	.version = KAUX_FAMILY_VERSION,
-	/* what this build assumes; the tool checks it against the running kernel */
+	// what this build assumes; the userspace half checks it against the running kernel
 	.va_bits = CONFIG_ARM64_VA_BITS,
 	.page_shift = PAGE_SHIFT,
 };
-void uidfake_status_get(struct kaux_status *out)
+void tosya_status_get(struct kaux_status *out)
 {
 	*out = g_status;
 	/* The reader checks these before it believes anything else, so they are set
@@ -28,7 +28,7 @@ void uidfake_status_get(struct kaux_status *out)
 	out->size = sizeof(*out);
 	out->version = KAUX_FAMILY_VERSION;
 }
-void uidfake_status_set_hooks(unsigned int native, unsigned int compat)
+void tosya_status_set_hooks(unsigned int native, unsigned int compat)
 {
 	g_status.native = native;
 	g_status.compat = compat;
@@ -46,20 +46,20 @@ static void set_name(char *dst, size_t len, const char *src)
 	dst[0] = '\0';
 }
 
-void uidfake_status_set_uid_tier(const char *name)
+void tosya_status_set_uid_tier(const char *name)
 {
 	set_name(g_status.uid_tier, sizeof(g_status.uid_tier), name);
 }
 
-void uidfake_status_set_setuid_tier(const char *name)
+void tosya_status_set_setuid_tier(const char *name)
 {
 	set_name(g_status.setuid_tier, sizeof(g_status.setuid_tier), name);
 	if (name && *name)
 		g_status.flags |= KAUX_F_SETUID;
 }
 
-void uidfake_status_set_apks(unsigned int inodes, unsigned int expected,
-			     unsigned int failed)
+void tosya_status_set_apks(unsigned int inodes, unsigned int expected,
+			   unsigned int failed)
 {
 	g_status.apk_inodes = inodes;
 	g_status.apk_offered = expected;
@@ -74,29 +74,29 @@ void uidfake_status_set_apks(unsigned int inodes, unsigned int expected,
 	if (failed == 0)
 		g_status.flags |= KAUX_F_APKS;
 }
-void uidfake_status_note(int error)
+void tosya_status_note(int error)
 {
 	g_status.last_error = error;
 }
-void uidfake_status_add_flags(unsigned int flags)
+void tosya_status_add_flags(unsigned int flags)
 {
 	g_status.flags |= flags;
 }
 
-void uidfake_status_set_hooks_expected(unsigned int native, unsigned int compat)
+void tosya_status_set_hooks_expected(unsigned int native, unsigned int compat)
 {
 	g_status.native_expected = native;
 	g_status.compat_expected = compat;
 }
 
-void uidfake_status_add_hooks(unsigned int native, unsigned int compat)
+void tosya_status_add_hooks(unsigned int native, unsigned int compat)
 {
 	g_status.native += native;
 	g_status.compat += compat;
-	uidfake_status_set_hooks(g_status.native, g_status.compat);
+	tosya_status_set_hooks(g_status.native, g_status.compat);
 }
 
-void uidfake_status_add_hooks_expected(unsigned int native, unsigned int compat)
+void tosya_status_add_hooks_expected(unsigned int native, unsigned int compat)
 {
 	g_status.native_expected += native;
 	g_status.compat_expected += compat;

@@ -21,7 +21,7 @@
 #include <linux/stop_machine.h>
 #include <linux/string.h>
 
-#include "uidfake.h"
+#include "tosya.h"
 
 static int probe_noop(struct kprobe *p, struct pt_regs *r)
 {
@@ -29,24 +29,21 @@ static int probe_noop(struct kprobe *p, struct pt_regs *r)
 }
 
 /*
- * Symbol lookup, the way KernelSU does it on arm64: resolve a name through
- * kallsyms, accept the CFI jump-table variant of it as well (that is what a call
- * site reaches on a CFI kernel), and fall back to walking the whole kallsyms
- * table when kallsyms_lookup_name() cannot be had. Nothing here reads an offset
- * out of a function body.
+ * Symbol lookup: resolve a name through kallsyms, accept the CFI jump-table variant
+ * of it as well (that is what a call site reaches on a CFI kernel), and fall back to
+ * walking the whole kallsyms table when kallsyms_lookup_name() cannot be had.
+ * Nothing here reads an offset out of a function body.
  *
  * kallsyms_lookup_name() and kallsyms_on_each_symbol() are not exported to
  * modules, so their own addresses come from a probe registered on them -- kprobe
  * resolves .symbol_name through kallsyms internally -- unregistered immediately,
  * so nothing stays behind.
- */
-/*
+ *
  * Pre-kCFI kernels (before 6.1) check an indirect call against the callee's jump
  * table, so the address a call has to carry is the .cfi_jt one; from 6.1 the check
- * is a type hash on the function itself and there is no jump table to prefer. The
- * split is the one KernelSU makes with USE_KCFI.
+ * is a type hash on the function itself and there is no jump table to prefer.
  */
-#define UF_USE_KCFI (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
+#define TOSYA_USE_KCFI (LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0))
 
 static unsigned long lookup_exported(const char *symbol)
 {
@@ -61,9 +58,9 @@ static unsigned long lookup_exported(const char *symbol)
 }
 
 /*
- * The call goes to an address kallsyms handed us, and on a pre-kCFI kernel the
+ * The call goes to an address kallsyms handed the module, and on a pre-kCFI kernel the
  * indirect-call check consults the callee's jump table: a function that reaches a
- * resolved address is marked __nocfi, the way KernelSU marks its dispatcher.
+ * resolved address is marked __nocfi.
  */
 static noinline unsigned long __nocfi lookup_name(const char *name)
 {
@@ -76,7 +73,7 @@ static noinline unsigned long __nocfi lookup_name(const char *name)
 struct find_ctx {
 	const char *name;
 	unsigned long addr;
-	unsigned long next; /* the following symbol: where the body ends */
+	unsigned long next; // the following symbol: where the body ends
 	bool prefer_cfi;
 };
 
@@ -92,7 +89,7 @@ static int find_symbol_cb(void *data, const char *name, unsigned long addr)
 		ctx->next = addr;
 	if (!ctx->addr && name && strcmp(name, ctx->name) == 0)
 		ctx->addr = addr;
-#if !UF_USE_KCFI
+#if !TOSYA_USE_KCFI
 	/* Only callable-address lookup prefers the jump table. A body/range or
 	 * raw-pointer lookup must never switch to this veneer or stop here. */
 	if (ctx->prefer_cfi) {
@@ -160,11 +157,11 @@ static noinline void __nocfi find_symbol(const char *name, struct find_ctx *ctx,
 #endif
 }
 
-unsigned long uidfake_lookup(const char *name)
+unsigned long tosya_lookup(const char *name)
 {
 	unsigned long addr;
 
-#if !UF_USE_KCFI
+#if !TOSYA_USE_KCFI
 	char cfi[KSYM_NAME_LEN + 16];
 
 	/*
@@ -197,7 +194,7 @@ unsigned long uidfake_lookup(const char *name)
  * function addresses (an LSM hook list, for one) holds the plain symbol, so a
  * name has to be resolvable to exactly that to be matched against it.
  */
-unsigned long uidfake_lookup_raw(const char *name)
+unsigned long tosya_lookup_raw(const char *name)
 {
 	unsigned long addr = lookup_name(name);
 
@@ -216,8 +213,8 @@ unsigned long uidfake_lookup_raw(const char *name)
  * A symbol's address and extent for validating a complete function snapshot.
  * The following symbol bounds it, and the walk already computes that.
  */
-bool uidfake_symbol_range(const char *name, unsigned long *addr,
-			  unsigned long *size)
+bool tosya_symbol_range(const char *name, unsigned long *addr,
+			unsigned long *size)
 {
 	struct find_ctx ctx;
 
@@ -235,7 +232,7 @@ bool uidfake_symbol_range(const char *name, unsigned long *addr,
  */
 static struct mm_struct *patch_mm;
 
-/* Defined below; lazy legacy-mapping calibration probes _stext with both. */
+// Defined below; lazy legacy-mapping calibration probes _stext with both.
 static phys_addr_t phys_from_virt(unsigned long addr);
 static phys_addr_t image_phys(unsigned long addr);
 
@@ -299,54 +296,53 @@ static unsigned long g_set_fixmap_addr;
 static unsigned long g_copy_nofault_addr;
 static unsigned long g_copy_from_nofault_addr;
 static unsigned long g_patch_insn_addr;
-/* Serialize our expected-value checks with our other patch operations. */
+// Serialize the module's expected-value checks with the module's other patch operations.
 static DEFINE_MUTEX(g_patch_mutex);
 
-typedef void (*uf_set_fixmap_t)(enum fixed_addresses idx, phys_addr_t phys,
-				pgprot_t prot);
-typedef long (*uf_copy_nofault_t)(void *dst, const void *src, size_t size);
-typedef long (*uf_copy_from_nofault_t)(void *dst, const void *src, size_t size);
-typedef int (*uf_patch_insn_t)(void *addr, u32 insn);
+typedef void (*tosya_set_fixmap_t)(enum fixed_addresses idx, phys_addr_t phys,
+				   pgprot_t prot);
+typedef long (*tosya_copy_nofault_t)(void *dst, const void *src, size_t size);
+typedef long (*tosya_copy_from_nofault_t)(void *dst, const void *src,
+					  size_t size);
+typedef int (*tosya_patch_insn_t)(void *addr, u32 insn);
 
 static noinline int __nocfi patch_native_insn(void *addr, u32 insn)
 {
-	return ((uf_patch_insn_t)g_patch_insn_addr)(addr, insn);
+	return ((tosya_patch_insn_t)g_patch_insn_addr)(addr, insn);
 }
 
 static noinline void __nocfi patch_set_fixmap(enum fixed_addresses idx,
 					      phys_addr_t phys, pgprot_t prot)
 {
-	((uf_set_fixmap_t)g_set_fixmap_addr)(idx, phys, prot);
+	((tosya_set_fixmap_t)g_set_fixmap_addr)(idx, phys, prot);
 }
 
 static noinline long __nocfi patch_copy_nofault(void *dst, const void *src,
 						size_t size)
 {
-	return ((uf_copy_nofault_t)g_copy_nofault_addr)(dst, src, size);
+	return ((tosya_copy_nofault_t)g_copy_nofault_addr)(dst, src, size);
 }
 
 static noinline long __nocfi patch_copy_from_nofault(void *dst, const void *src,
 						     size_t size);
 
-void uidfake_debug_dump(const char *name, unsigned long addr,
-			unsigned long size)
+void tosya_debug_dump(const char *name, unsigned long addr, unsigned long size)
 {
 	u8 buf[64];
 	unsigned long n = size < sizeof(buf) ? size : sizeof(buf);
 	unsigned long i;
 
-	if (!UF_DEBUG_ON() || n == 0)
+	if (!TOSYA_DEBUG_ON() || n == 0)
 		return;
-	if (!uidfake_read((const void *)addr, buf, n))
+	if (!tosya_read((const void *)addr, buf, n))
 		return;
-	pr_info("uidfake: %s at %#lx, %lu of %lu bytes:\n", name, addr, n,
-		size);
+	pr_info("tosya: %s at %#lx, %lu of %lu bytes:\n", name, addr, n, size);
 	for (i = 0; i < n; i += 16)
-		pr_info("uidfake:  %*phN\n", (int)(n - i < 16 ? n - i : 16),
+		pr_info("tosya:  %*phN\n", (int)(n - i < 16 ? n - i : 16),
 			buf + i);
 }
 
-bool uidfake_read(const void *src, void *dst, size_t len)
+bool tosya_read(const void *src, void *dst, size_t len)
 {
 	if (!g_copy_from_nofault_addr)
 		return false;
@@ -356,17 +352,17 @@ bool uidfake_read(const void *src, void *dst, size_t len)
 static noinline long __nocfi patch_copy_from_nofault(void *dst, const void *src,
 						     size_t size)
 {
-	return ((uf_copy_from_nofault_t)g_copy_from_nofault_addr)(dst, src,
-								  size);
+	return ((tosya_copy_from_nofault_t)g_copy_from_nofault_addr)(dst, src,
+								     size);
 }
 
-int uidfake_patch_init(void)
+int tosya_patch_init(void)
 {
 	/* The kernel's own extent: every patch target has to be inside it, or the
 	 * write would land somewhere it has no business being. */
-	g_text_start = uidfake_lookup("_stext");
-	g_text_end = uidfake_lookup("_end");
-	g_core_text_end = uidfake_lookup("_etext");
+	g_text_start = tosya_lookup("_stext");
+	g_text_end = tosya_lookup("_end");
+	g_core_text_end = tosya_lookup("_etext");
 
 	/*
 	 * This module's own text: the copy of a hooked function and the stub that
@@ -382,23 +378,22 @@ int uidfake_patch_init(void)
 	g_mod_end = g_mod_start + THIS_MODULE->core_layout.text_size;
 #endif
 
-	patch_mm = (struct mm_struct *)uidfake_lookup("init_mm");
-	g_kimage_voffset = (unsigned long *)uidfake_lookup("kimage_voffset");
-	g_memstart_addr = (unsigned long *)uidfake_lookup("memstart_addr");
-	g_set_fixmap_addr = uidfake_lookup("__set_fixmap");
-	g_copy_nofault_addr = uidfake_lookup("copy_to_kernel_nofault");
+	patch_mm = (struct mm_struct *)tosya_lookup("init_mm");
+	g_kimage_voffset = (unsigned long *)tosya_lookup("kimage_voffset");
+	g_memstart_addr = (unsigned long *)tosya_lookup("memstart_addr");
+	g_set_fixmap_addr = tosya_lookup("__set_fixmap");
+	g_copy_nofault_addr = tosya_lookup("copy_to_kernel_nofault");
 	if (!g_copy_nofault_addr)
-		g_copy_nofault_addr =
-			uidfake_lookup("__copy_to_kernel_nofault");
-	g_copy_from_nofault_addr = uidfake_lookup("copy_from_kernel_nofault");
+		g_copy_nofault_addr = tosya_lookup("__copy_to_kernel_nofault");
+	g_copy_from_nofault_addr = tosya_lookup("copy_from_kernel_nofault");
 	if (!g_copy_from_nofault_addr)
 		g_copy_from_nofault_addr =
-			uidfake_lookup("__copy_from_kernel_nofault");
+			tosya_lookup("__copy_from_kernel_nofault");
 	/* Stable arm64 signature across supported ACK trees; the implementation
 	 * owns its fixmap geometry, lock and instruction cache maintenance. */
-	g_patch_insn_addr = uidfake_lookup("aarch64_insn_patch_text_nosync");
-	if (UF_DEBUG_ON())
-		pr_info("uidfake: init_mm=%px kimage_voffset=%px memstart_addr=%px set_fixmap=%px nofault=%px mod=%#lx-%#lx\n",
+	g_patch_insn_addr = tosya_lookup("aarch64_insn_patch_text_nosync");
+	if (TOSYA_DEBUG_ON())
+		pr_info("tosya: init_mm=%px kimage_voffset=%px memstart_addr=%px set_fixmap=%px nofault=%px mod=%#lx-%#lx\n",
 			(void *)patch_mm, (void *)g_kimage_voffset,
 			(void *)g_memstart_addr, (void *)g_set_fixmap_addr,
 			(void *)g_copy_nofault_addr, (unsigned long)g_mod_start,
@@ -406,11 +401,11 @@ int uidfake_patch_init(void)
 	if ((!patch_mm || !g_set_fixmap_addr) && !g_patch_insn_addr)
 		return -ENOENT;
 
-	g_vmemmap = uidfake_lookup_raw("vmemmap");
+	g_vmemmap = tosya_lookup_raw("vmemmap");
 	if (g_vmemmap)
 		g_fixmap_top = g_vmemmap - SZ_32M;
-	if (UF_DEBUG_ON())
-		pr_info("uidfake: vmemmap=%px fixmap_top=%#lx (this build's: %#lx)\n",
+	if (TOSYA_DEBUG_ON())
+		pr_info("tosya: vmemmap=%px fixmap_top=%#lx (this build's: %#lx)\n",
 			(void *)g_vmemmap, g_fixmap_top,
 			(unsigned long)__fix_to_virt(FIX_TEXT_POKE0) +
 				((unsigned long)FIX_TEXT_POKE0 << PAGE_SHIFT));
@@ -432,7 +427,7 @@ static void prepare_legacy_patch(void)
 
 		if (walk && offset && walk != offset) {
 			g_walk_usable = false;
-			pr_info("uidfake: page table walk disagrees with kimage_voffset (kernel geometry is not this module's); using the image offset alone\n");
+			pr_info("tosya: page table walk disagrees with kimage_voffset (kernel geometry is not this module's); using the image offset alone\n");
 		}
 	}
 	g_legacy_prepared = true;
@@ -446,8 +441,8 @@ struct patch_req {
 };
 
 /*
- * Physical address of a kernel address, by walking init_mm the way KernelSU's
- * patcher does. Kernel .rodata (where sys_call_table lives) is often mapped as a
+ * Physical address of a kernel address, by walking init_mm. Kernel .rodata (where
+ * sys_call_table lives) is often mapped as a
  * 2 MB block and the image as 1 GB blocks, so a block mapping is resolved to the
  * page inside it instead of being rejected. The page offset is part of the
  * result, which is what the fixmap copy wants.
@@ -580,23 +575,20 @@ static int patch_nosync(void *dst, const void *src, size_t len)
 	int ret;
 
 	/*
-	 * Every target is inside [_stext, _end) (checked in uidfake_patch_text), and
+	 * Every target is inside [_stext, _end) (checked in tosya_patch_text), and
 	 * the image is one contiguous block, so the image offset translates it
 	 * exactly -- and it is the only translation that works on a vendor kernel
 	 * whose struct mm_struct differs from the tree this module was built
 	 * against, which is where the walk gives up. The walk is the second opinion
-	 * then, and the fallback where the offset is not readable.
-	 */
-	/* A module address is not in the image, so the image offset cannot translate
-	 * it: the page-table walk is the only source there. */
+	 * then, and the fallback where the offset is not readable. */
 	if (g_mod_start && p >= g_mod_start && p < g_mod_end)
 		offset = 0;
 
 	if (offset) {
 		if (walk && walk != offset) {
-			pr_warn("uidfake: refusing to write: the walk and the image offset disagree\n");
-			if (UF_DEBUG_ON())
-				pr_info("uidfake:   %px walk=%pa image=%pa\n",
+			pr_warn("tosya: refusing to write: the walk and the image offset disagree\n");
+			if (TOSYA_DEBUG_ON())
+				pr_info("tosya:   %px walk=%pa image=%pa\n",
 					dst, &walk, &offset);
 			return -EFAULT;
 		}
@@ -604,14 +596,14 @@ static int patch_nosync(void *dst, const void *src, size_t len)
 		checked = true;
 	} else {
 		if (!walk) {
-			pr_warn("uidfake: no physical address for the target\n");
-			if (UF_DEBUG_ON())
-				pr_info("uidfake:   %px\n", dst);
+			pr_warn("tosya: no physical address for the target\n");
+			if (TOSYA_DEBUG_ON())
+				pr_info("tosya:   %px\n", dst);
 			return -EFAULT;
 		}
 		if (!g_offset_warned) {
 			g_offset_warned = true;
-			pr_info("uidfake: kimage_voffset unusable; using the page table walk\n");
+			pr_info("tosya: kimage_voffset unusable; using the page table walk\n");
 		}
 		phy = walk;
 		checked = false;
@@ -637,7 +629,7 @@ static int patch_nosync(void *dst, const void *src, size_t len)
 		patch_set_fixmap(idx, phy, PAGE_KERNEL);
 
 		if (!g_copy_from_nofault_addr)
-			break; /* nothing to prove it with: the first alias is used */
+			break; // nothing to prove it with: the first alias is used
 		{
 			u8 seen[8], want[8];
 			const size_t n = len < sizeof(seen) ? len :
@@ -656,9 +648,9 @@ static int patch_nosync(void *dst, const void *src, size_t len)
 		}
 	}
 	if (a == naliases) {
-		pr_warn("uidfake: no fixmap alias proved out; nothing written\n");
-		if (UF_DEBUG_ON())
-			pr_info("uidfake:   %px this build's %#lx, the kernel's %#lx\n",
+		pr_warn("tosya: no fixmap alias proved out; nothing written\n");
+		if (TOSYA_DEBUG_ON())
+			pr_info("tosya:   %px this build's %#lx, the kernel's %#lx\n",
 				dst, aliases[0],
 				naliases > 1 ? aliases[1] : 0UL);
 		return -EFAULT;
@@ -673,9 +665,9 @@ static int patch_nosync(void *dst, const void *src, size_t len)
 	patch_set_fixmap(idx, 0, __pgprot(0));
 
 	if (ret)
-		pr_warn("uidfake: the write failed: %d\n", ret);
-	if (UF_DEBUG_ON())
-		pr_info("uidfake:   %px\n", dst);
+		pr_warn("tosya: the write failed: %d\n", ret);
+	if (TOSYA_DEBUG_ON())
+		pr_info("tosya:   %px\n", dst);
 	return ret;
 }
 
@@ -743,13 +735,13 @@ static int patch_insn_stopped(void *arg)
 	__le32 observed;
 
 	if (atomic_inc_return(&r->cpu_count) == num_online_cpus()) {
-		if (!uidfake_read(r->addr, &observed, sizeof(observed)))
+		if (!tosya_read(r->addr, &observed, sizeof(observed)))
 			r->result = -EFAULT;
 		else if (le32_to_cpu(observed) != r->expected)
 			r->result = -EBUSY;
 		else
 			r->result = patch_native_insn(r->addr, r->replacement);
-		/* The native helper has finished its cache maintenance here. */
+		// The native helper has finished its cache maintenance here.
 		atomic_inc(&r->cpu_count);
 	} else {
 		while (atomic_read(&r->cpu_count) <= num_online_cpus())
@@ -772,7 +764,7 @@ static int patch_insn_stopped(void *arg)
  * guards against an entry already changed by another patcher, not against a
  * foreign patcher subsequently modifying the copied function body.
  */
-int uidfake_patch_insn(void *dst, u32 expected, u32 replacement)
+int tosya_patch_insn(void *dst, u32 expected, u32 replacement)
 {
 	unsigned long addr = (unsigned long)dst;
 	struct insn_patch_req req = {
@@ -796,7 +788,7 @@ int uidfake_patch_insn(void *dst, u32 expected, u32 replacement)
 	return ret ? ret : req.result;
 }
 
-int uidfake_patch_text(void *dst, const void *src, size_t len, bool sync)
+int tosya_patch_text(void *dst, const void *src, size_t len, bool sync)
 {
 	struct patch_req req = {
 		.addr = dst,
@@ -810,12 +802,12 @@ int uidfake_patch_text(void *dst, const void *src, size_t len, bool sync)
 	if (!len || (unsigned long)dst & 3 || len & 3)
 		return -EINVAL;
 	/* Refuse anything outside the kernel image before a single byte is written:
-	 * a wrong physical address used to be caught only by reading the target
-	 * back, which is too late -- the stray write has already happened. */
+	 * reading the target back afterwards is too late: the stray write has
+	 * already happened. */
 	if (!writable_range((unsigned long)dst, len)) {
-		pr_warn("uidfake: refusing to patch: neither the kernel image nor this module\n");
-		if (UF_DEBUG_ON())
-			pr_info("uidfake:   %px\n", dst);
+		pr_warn("tosya: refusing to patch: neither the kernel image nor this module\n");
+		if (TOSYA_DEBUG_ON())
+			pr_info("tosya:   %px\n", dst);
 		return -EPERM;
 	}
 	native_module = g_patch_insn_addr && g_mod_start &&

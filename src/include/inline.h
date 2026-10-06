@@ -18,14 +18,17 @@
  * callers must supply a complete function without embedded data or external
  * fixups (such as exception-table entries).
  */
-#define UF_INLINE_INSN 4u
-#define UF_INLINE_MAX_SOURCE 1024u
-#define UF_INLINE_MAX_COPY (UF_INLINE_MAX_SOURCE * 4u + UF_INLINE_INSN)
+#define TOSYA_INLINE_INSN 4u
+#define TOSYA_INLINE_MAX_SOURCE 1024u
+#define TOSYA_INLINE_MAX_COPY (TOSYA_INLINE_MAX_SOURCE * 4u + TOSYA_INLINE_INSN)
 
-#define UF_INLINE_OK 0
-#define UF_INLINE_ESIZE (-1) /* empty/oversize input or insufficient output */
-#define UF_INLINE_EINSN (-2) /* unsupported encoding or unaligned input */
-#define UF_INLINE_ERANGE (-3) /* a relative target cannot be represented */
+#define TOSYA_INLINE_OK 0
+// empty/oversize input or insufficient output
+#define TOSYA_INLINE_ESIZE (-1)
+// unsupported encoding or unaligned input
+#define TOSYA_INLINE_EINSN (-2)
+// a relative target cannot be represented
+#define TOSYA_INLINE_ERANGE (-3)
 
 /*
  * @from and @to must be disjoint, instruction-aligned buffers. Addresses denote
@@ -34,9 +37,9 @@
  * begins with the original first instruction; an indirect caller must arrange
  * a BTI landing pad before it when required.
  */
-int uf_inline_relocate(void *to, size_t to_size, const void *from,
-		       unsigned long from_va, unsigned long to_va, size_t len,
-		       size_t *out_len);
+int tosya_inline_relocate(void *to, size_t to_size, const void *from,
+			  unsigned long from_va, unsigned long to_va,
+			  size_t len, size_t *out_len);
 
 /*
  * One B instruction, with no scratch register or indirect landing-pad demand.
@@ -45,6 +48,6 @@ int uf_inline_relocate(void *to, size_t to_size, const void *from,
  * following instruction as @site_va. Publishing still needs an SMP instruction
  * synchronization protocol; this helper only builds the replacement word.
  */
-#define UF_INLINE_ENTRY 4u
-int uf_inline_entry(void *out, size_t out_size, unsigned long site_va,
-		    unsigned long hook_va);
+#define TOSYA_INLINE_ENTRY 4u
+int tosya_inline_entry(void *out, size_t out_size, unsigned long site_va,
+		       unsigned long hook_va);

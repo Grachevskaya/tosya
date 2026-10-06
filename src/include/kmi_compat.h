@@ -12,8 +12,8 @@
  * #undefs the macros to fall back to LL/SC atomics. Same semantics, only
  * affects the inlined code of this module, no ABI change.
  */
-#ifndef UIDFAKE_KMI_COMPAT_H
-#define UIDFAKE_KMI_COMPAT_H
+#ifndef TOSYA_KMI_COMPAT_H
+#define TOSYA_KMI_COMPAT_H
 
 #ifdef CONFIG_ARM64_LSE_ATOMICS
 #undef CONFIG_ARM64_LSE_ATOMICS
@@ -34,19 +34,19 @@
  * given here, and the header itself is skipped through its own guard.
  * Everything that reads it (asm/percpu.h, asm/perf_event.h, asm/processor.h)
  * reads it as a value, which is what the macro keeps working. src/Makefile
- * passes UIDFAKE_SP_REGISTER only where the register form is really present, so
- * a tree that already has the helper keeps it.
+ * passes TOSYA_SP_REGISTER only where the register form is present, so
+ * a tree that already has the userspace half keeps it.
  */
-#ifdef UIDFAKE_SP_REGISTER
+#ifdef TOSYA_SP_REGISTER
 #define __ASM_STACK_POINTER_H
-static inline unsigned long uidfake_current_sp(void)
+static inline unsigned long tosya_current_sp(void)
 {
 	unsigned long sp;
 
 	asm("mov %0, sp" : "=r"(sp));
 	return sp;
 }
-#define current_stack_pointer uidfake_current_sp()
+#define current_stack_pointer tosya_current_sp()
 #endif
 
 /*
@@ -60,9 +60,9 @@ static inline unsigned long uidfake_current_sp(void)
  * so the constraint is what gives: the header is skipped through its guard and
  * the instruction is written with a plain immediate, which is the same
  * encoding. Nothing in this module calls it; a header that reads it only has to
- * find it. src/Makefile passes UIDFAKE_KGDB_BRK for compilers that old.
+ * find it. src/Makefile passes TOSYA_KGDB_BRK for compilers that old.
  */
-#ifdef UIDFAKE_KGDB_BRK
+#ifdef TOSYA_KGDB_BRK
 #define __ARM_KGDB_H
 #include <asm/debug-monitors.h>
 static inline void arch_kgdb_breakpoint(void)
@@ -73,4 +73,4 @@ extern void kgdb_handle_bus_error(void);
 extern int kgdb_fault_expected;
 #endif
 
-#endif /* UIDFAKE_KMI_COMPAT_H */
+#endif

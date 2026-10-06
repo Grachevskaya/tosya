@@ -24,9 +24,9 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 
 /* What the block expects from the kernel. */
-#define UF_APK_MAX 16
-#define UF_APP_MIN 10000u
-#define UF_APP_SPAN 10000u
+#define TOSYA_APK_MAX 16
+#define TOSYA_APP_MIN 10000u
+#define TOSYA_APP_SPAN 10000u
 #define I_NEW 1u
 #define I_FREEING 2u
 #define I_WILL_FREE 4u
@@ -40,7 +40,7 @@ typedef uint64_t u64;
 #define WRITE_ONCE(x, v) ((x) = (v))
 #define container_of(ptr, type, member) \
 	((type *)((char *)(ptr) - offsetof(type, member)))
-#define UF_DEBUG_ON() 0
+#define TOSYA_DEBUG_ON() 0
 #define pr_info(...) ((void)0)
 #define pr_warn(...) ((void)0)
 #define atomic_read(p) (*(p))
@@ -93,19 +93,19 @@ static int g_module;
 
 static bool g_kstrdup_fails;
 
-static void *uf_kzalloc(size_t bytes)
+static void *tosya_kzalloc(size_t bytes)
 {
 	return calloc(1, bytes);
 }
 
-static char *uf_kstrdup(const char *s)
+static char *tosya_kstrdup(const char *s)
 {
 	return g_kstrdup_fails ? NULL : strdup(s);
 }
 
-#define kzalloc(bytes, flags) uf_kzalloc(bytes)
+#define kzalloc(bytes, flags) tosya_kzalloc(bytes)
 #define kfree(p) free(p)
-#define kstrdup(s, flags) uf_kstrdup(s)
+#define kstrdup(s, flags) tosya_kstrdup(s)
 
 /* igrab() refuses an inode that is being freed -- that is what makes reading its
  * fields safe -- and iput() gives the reference back; the last one evicts the
@@ -189,14 +189,14 @@ static void path_put(struct path *p)
 	iput(p->dentry->inode);
 }
 
-static unsigned long uidfake_lookup(const char *name)
+static unsigned long tosya_lookup(const char *name)
 {
 	(void)name;
 	return (unsigned long)fake_kern_path;
 }
 
-static void uidfake_status_set_apks(unsigned int inodes, unsigned int offered,
-				    unsigned int failed)
+static void tosya_status_set_apks(unsigned int inodes, unsigned int offered,
+				  unsigned int failed)
 {
 	(void)inodes;
 	(void)offered;
@@ -209,7 +209,7 @@ static void uidfake_status_set_apks(unsigned int inodes, unsigned int offered,
 static struct inode *new_inode(const struct file_operations *ops,
 			       unsigned long ino, int count)
 {
-	struct inode *inode = uf_kzalloc(sizeof(*inode));
+	struct inode *inode = tosya_kzalloc(sizeof(*inode));
 
 	assert(inode != NULL);
 	inode->i_fop = ops;
@@ -237,12 +237,12 @@ static void setup_b(int held)
 /* The block asks the tag record two questions (see tag.c): nothing here is
  * waiting for a name, and the name itself is what the test that follows checks
  * by hand rather than through the hook. */
-bool uidfake_tag_pending_here(void)
+bool tosya_tag_pending_here(void)
 {
 	return false;
 }
 
-void uidfake_tag_name(u32 app)
+void tosya_tag_name(u32 app)
 {
 	(void)app;
 }
@@ -265,7 +265,7 @@ static void scenario_early_put(void)
 	assert(shadow_replace(kApkA, 10123) == 0);
 	assert(g_shadow_n == 1);
 	assert(!g_shadow[0]->parked);
-	assert(g_shadow[0]->dev == uf_encode_dev(g_sb.s_dev));
+	assert(g_shadow[0]->dev == tosya_encode_dev(g_sb.s_dev));
 	assert(g_shadow[0]->ino == 100);
 	assert(g_shadow[0]->app == 123);
 	assert(g_shadow[0]->fops.owner == THIS_MODULE);
@@ -280,7 +280,7 @@ static void scenario_no_reuse(void)
 	setup_a(1);
 	setup_b(0);
 	assert(shadow_replace(kApkA, 10123) == 0);
-	shadow_drop_id(uf_encode_dev(g_sb.s_dev), 100);
+	shadow_drop_id(tosya_encode_dev(g_sb.s_dev), 100);
 	assert(g_shadow[0]->parked);
 
 	assert(shadow_replace(kApkB, 10456) == 0);
@@ -302,10 +302,10 @@ static void scenario_readd(void)
 {
 	setup_a(1);
 	assert(shadow_replace(kApkA, 10123) == 0);
-	shadow_drop_id(uf_encode_dev(g_sb.s_dev), 100);
+	shadow_drop_id(tosya_encode_dev(g_sb.s_dev), 100);
 	assert(shadow_replace(kApkA, 10123) == 0);
 	assert(g_shadow_n == 2);
-	assert(g_shadow[1]->orig_open != uf_shadow_open);
+	assert(g_shadow[1]->orig_open != tosya_shadow_open);
 	assert(g_shadow[1]->orig_open == open_a);
 	assert(open_through(&g_shadow[1]->fops, g_a) == 11);
 }
@@ -327,7 +327,7 @@ static void scenario_remove(void)
 	setup_a(1);
 	assert(shadow_replace(kApkA, 10123) == 0);
 	assert(g_a->i_fop == &g_shadow[0]->fops);
-	uidfake_apk_remove();
+	tosya_apk_remove();
 	assert(g_shadow_n == 0);
 	assert(g_a->i_fop == &ops_a);
 }

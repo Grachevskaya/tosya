@@ -19,7 +19,7 @@ struct task_struct {
 };
 
 /* host-test shim: no SELinux, so the isolated path resolves nothing. */
-#define UIDFAKE_HOST_BUILD 1
+#define TOSYA_HOST_BUILD 1
 #define security_cred_getsecid(cred, sid) \
 	do {                              \
 		(void)(cred);             \

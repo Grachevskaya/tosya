@@ -1,44 +1,46 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/kernel.h>
 #include <linux/module.h>
-#ifdef UIDFAKE_HOST_TEST
-#include <string.h> /* the host test compiles this file against its own shims */
+#ifdef TOSYA_HOST_TEST
+// the host test compiles this file against its own shims
+#include <string.h>
 #else
 #include <linux/string.h>
 #endif
 
-#include "uidfake.h"
+#include "tosya.h"
 #include "tier.h"
 
-extern const struct uf_tier uf_tier_uid_inline;
-extern const struct uf_tier uf_tier_uid_tables;
-extern const struct uf_tier uf_tier_setuid_inline;
-extern const struct uf_tier uf_tier_setuid_lsm;
-extern const struct uf_tier uf_tier_setuid_setters;
+extern const struct tosya_tier tosya_tier_uid_inline;
+extern const struct tosya_tier tosya_tier_uid_tables;
+extern const struct tosya_tier tosya_tier_setuid_inline;
+extern const struct tosya_tier tosya_tier_setuid_lsm;
+extern const struct tosya_tier tosya_tier_setuid_setters;
 
-#ifdef UIDFAKE_HOST_TEST
-static const struct uf_tier *const *g_test_tiers;
+#ifdef TOSYA_HOST_TEST
+static const struct tosya_tier *const *g_test_tiers;
 static unsigned int g_test_tiers_n;
 
-void uf_tier_set_table(const struct uf_tier *const *tiers, unsigned int n)
+void tosya_tier_set_table(const struct tosya_tier *const *tiers, unsigned int n)
 {
 	g_test_tiers = tiers;
 	g_test_tiers_n = n;
 }
 #endif
 
-#ifndef UIDFAKE_HOST_TEST
-static const struct uf_tier *const g_tiers[] = {
-	&uf_tier_uid_inline, &uf_tier_uid_tables,     &uf_tier_setuid_inline,
-	&uf_tier_setuid_lsm, &uf_tier_setuid_setters,
+#ifndef TOSYA_HOST_TEST
+static const struct tosya_tier *const g_tiers[] = {
+	&tosya_tier_uid_inline,	    &tosya_tier_uid_tables,
+	&tosya_tier_setuid_inline,  &tosya_tier_setuid_lsm,
+	&tosya_tier_setuid_setters,
 };
 #else
-static const struct uf_tier *const g_tiers[] = { NULL };
+static const struct tosya_tier *const g_tiers[] = { NULL };
 #endif
 
-static const struct uf_tier *tier_at(unsigned int i)
+static const struct tosya_tier *tier_at(unsigned int i)
 {
-#ifdef UIDFAKE_HOST_TEST
+#ifdef TOSYA_HOST_TEST
 	if (g_test_tiers)
 		return g_test_tiers[i];
 #endif
@@ -47,20 +49,20 @@ static const struct uf_tier *tier_at(unsigned int i)
 
 static unsigned int tier_count(void)
 {
-#ifdef UIDFAKE_HOST_TEST
+#ifdef TOSYA_HOST_TEST
 	if (g_test_tiers)
 		return g_test_tiers_n;
 #endif
 	return (unsigned int)ARRAY_SIZE(g_tiers);
 }
 
-#define UF_TIER_MAX 8
-static const struct uf_tier *g_installed[UF_TIER_MAX];
+#define TOSYA_TIER_MAX 8
+static const struct tosya_tier *g_installed[TOSYA_TIER_MAX];
 static int g_installed_n;
-static const struct uf_tier *g_tried[16];
+static const struct tosya_tier *g_tried[16];
 static int g_tried_n;
 
-static bool already_tried(const struct uf_tier *t)
+static bool already_tried(const struct tosya_tier *t)
 {
 	int i;
 
@@ -70,9 +72,9 @@ static bool already_tried(const struct uf_tier *t)
 	return false;
 }
 
-int uf_tier_install(const char *family, const char *force)
+int tosya_tier_install(const char *family, const char *force)
 {
-	const struct uf_tier *t, *best;
+	const struct tosya_tier *t, *best;
 	bool forced = force && *force && strcmp(force, "auto");
 	unsigned int i;
 
@@ -87,15 +89,15 @@ int uf_tier_install(const char *family, const char *force)
 				continue;
 			rc = t->install();
 			if (rc) {
-				pr_err("uidfake: %s: %s was asked for and did not install (%d)\n",
+				pr_err("tosya: %s: %s was asked for and did not install (%d)\n",
 				       family, t->name, rc);
 				return rc;
 			}
-			if (g_installed_n < UF_TIER_MAX)
+			if (g_installed_n < TOSYA_TIER_MAX)
 				g_installed[g_installed_n++] = t;
 			return 0;
 		}
-		pr_err("uidfake: %s: no mechanism named '%s'\n", family, force);
+		pr_err("tosya: %s: no mechanism named '%s'\n", family, force);
 		return -ENOENT;
 	}
 
@@ -114,11 +116,11 @@ int uf_tier_install(const char *family, const char *force)
 			g_tried[g_tried_n++] = best;
 
 		if (best->install() == 0) {
-			if (g_installed_n < UF_TIER_MAX)
+			if (g_installed_n < TOSYA_TIER_MAX)
 				g_installed[g_installed_n++] = best;
 			return 0;
 		}
-		pr_warn("uidfake: %s: %s did not install, trying the next\n",
+		pr_warn("tosya: %s: %s did not install, trying the next\n",
 			family, best->name);
 	}
 	return -ENODEV;
@@ -131,12 +133,12 @@ static void forget(int i)
 	g_installed_n--;
 }
 
-void uf_tier_revert(const char *family)
+void tosya_tier_revert(const char *family)
 {
 	int i;
 
-	if (uidfake_inline_active()) {
-		pr_warn("uidfake: inline tiers are permanent until reboot; keeping the registry\n");
+	if (tosya_inline_active()) {
+		pr_warn("tosya: inline tiers are permanent until reboot; keeping the registry\n");
 		return;
 	}
 
@@ -148,10 +150,10 @@ void uf_tier_revert(const char *family)
 	}
 }
 
-void uf_tier_revert_all(void)
+void tosya_tier_revert_all(void)
 {
-	if (uidfake_inline_active()) {
-		pr_warn("uidfake: inline tiers are permanent until reboot; keeping the registry\n");
+	if (tosya_inline_active()) {
+		pr_warn("tosya: inline tiers are permanent until reboot; keeping the registry\n");
 		return;
 	}
 	while (g_installed_n > 0) {
@@ -160,7 +162,7 @@ void uf_tier_revert_all(void)
 	}
 }
 
-const char *uf_tier_name(const char *family)
+const char *tosya_tier_name(const char *family)
 {
 	int i;
 

@@ -8,8 +8,8 @@
 /* policy.c moves the identity tag with a compare-and-swap so that a TIF_* bit set
  * by the kernel in the same word is never lost; single-threaded here, but the
  * shape has to be the kernel's: it returns the value that was there. */
-static inline unsigned long uf_host_cmpxchg(unsigned long *p, unsigned long old,
-					    unsigned long new)
+static inline unsigned long
+tosya_host_cmpxchg(unsigned long *p, unsigned long old, unsigned long new)
 {
 	if (*p == old) {
 		*p = new;
@@ -18,6 +18,6 @@ static inline unsigned long uf_host_cmpxchg(unsigned long *p, unsigned long old,
 	return *p;
 }
 
-#define cmpxchg(ptr, old, new)                                        \
-	uf_host_cmpxchg((unsigned long *)(ptr), (unsigned long)(old), \
-			(unsigned long)(new))
+#define cmpxchg(ptr, old, new)                                           \
+	tosya_host_cmpxchg((unsigned long *)(ptr), (unsigned long)(old), \
+			   (unsigned long)(new))

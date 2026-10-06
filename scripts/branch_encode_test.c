@@ -1,8 +1,8 @@
-/* Host test for the branch encoder in uidfake.h: this is the one piece that
+/* Host test for the branch encoder in tosya.h: this is the one piece that
  * must be exactly right, because a wrong encode writes garbage into kernel
  * text.
  */
-#include "uidfake.h"
+#include "tosya.h"
 #include <stdio.h>
 
 static int fails;

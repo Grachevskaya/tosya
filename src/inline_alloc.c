@@ -12,35 +12,36 @@
 #include <linux/string.h>
 #include <linux/vmalloc.h>
 
-#include "uidfake.h"
+#include "tosya.h"
 #include "inline_alloc.h"
 
-#define UF_BRANCH_REACH (128UL * 1024 * 1024)
+#define TOSYA_BRANCH_REACH (128UL * 1024 * 1024)
 
-typedef void *(*uf_vmalloc_range_t)(unsigned long, unsigned long, unsigned long,
-				    unsigned long, gfp_t, pgprot_t,
-				    unsigned long, int, const void *);
-typedef int (*uf_change_mem_t)(unsigned long, int);
-typedef void (*uf_flush_icache_t)(unsigned long, unsigned long);
-typedef int (*uf_vmap_addr_t)(const void *);
+typedef void *(*tosya_vmalloc_range_t)(unsigned long, unsigned long,
+				       unsigned long, unsigned long, gfp_t,
+				       pgprot_t, unsigned long, int,
+				       const void *);
+typedef int (*tosya_change_mem_t)(unsigned long, int);
+typedef void (*tosya_flush_icache_t)(unsigned long, unsigned long);
+typedef int (*tosya_vmap_addr_t)(const void *);
 
 /* Look up the running implementation. In particular, checking VAs through the
  * native predicate avoids importing the build kernel's VA_BITS assumptions. */
-static uf_vmalloc_range_t g_alloc;
-static uf_change_mem_t g_ro, g_x;
-static uf_flush_icache_t g_flush;
-static uf_vmap_addr_t g_is_vmap;
+static tosya_vmalloc_range_t g_alloc;
+static tosya_change_mem_t g_ro, g_x;
+static tosya_flush_icache_t g_flush;
+static tosya_vmap_addr_t g_is_vmap;
 
 static int resolve_allocators(void)
 {
 	if (g_alloc)
 		return 0;
-	g_ro = (void *)uidfake_lookup("set_memory_ro");
-	g_x = (void *)uidfake_lookup("set_memory_x");
-	g_flush = (void *)uidfake_lookup("caches_clean_inval_pou");
+	g_ro = (void *)tosya_lookup("set_memory_ro");
+	g_x = (void *)tosya_lookup("set_memory_x");
+	g_flush = (void *)tosya_lookup("caches_clean_inval_pou");
 	if (!g_flush)
-		g_flush = (void *)uidfake_lookup("__flush_icache_range");
-	g_is_vmap = (void *)uidfake_lookup("is_vmalloc_or_module_addr");
+		g_flush = (void *)tosya_lookup("__flush_icache_range");
+	g_is_vmap = (void *)tosya_lookup("is_vmalloc_or_module_addr");
 	if (!g_ro || !g_x || !g_flush || !g_is_vmap)
 		return -EOPNOTSUPP;
 
@@ -49,13 +50,13 @@ static int resolve_allocators(void)
 	 * supported near-allocation configuration yet. HW_TAGS/KASAN_VMALLOC
 	 * handle it within the native vmalloc path, as for module_alloc(). The
 	 * out-of-line shadow helpers exist only in the unsupported case. */
-	if (uidfake_lookup("kasan_alloc_module_shadow") ||
-	    uidfake_lookup("kasan_module_alloc"))
+	if (tosya_lookup("kasan_alloc_module_shadow") ||
+	    tosya_lookup("kasan_module_alloc"))
 		return -EOPNOTSUPP;
 
-	g_alloc = (void *)uidfake_lookup("__vmalloc_node_range");
+	g_alloc = (void *)tosya_lookup("__vmalloc_node_range");
 	if (!g_alloc)
-		g_alloc = (void *)uidfake_lookup("__vmalloc_node_range_noprof");
+		g_alloc = (void *)tosya_lookup("__vmalloc_node_range_noprof");
 	return g_alloc ? 0 : -EOPNOTSUPP;
 }
 
@@ -89,11 +90,9 @@ static void *try_range(unsigned long start, unsigned long end)
 	allocation = allocate_range(start, end);
 	if (!allocation)
 		return NULL;
-	/* This follows arm64 module_alloc/execmem: code addresses and PC-relative
-	 * literal loads use the kernel tag, not a random data allocation tag. */
-	/* Do not use the build-configuration-dependent kasan_reset_tag macro:
-	 * the running kernel may enable HW_TAGS when the DDK does not. For a
-	 * kernel-half ARM64 VA, resetting bits 63:56 gives the kernel tag. */
+	/* This follows arm64 module_alloc/execmem: the top byte is set to 0xff, which is
+	 * the kernel tag for a kernel-half ARM64 VA, and the running kernel may enable
+	 * HW_TAGS when the DDK does not. */
 	addr = (unsigned long)allocation | (0xffUL << 56);
 	if (!IS_ALIGNED(addr, PAGE_SIZE) || addr < start ||
 	    addr > end - 2 * PAGE_SIZE) {
@@ -103,7 +102,7 @@ static void *try_range(unsigned long start, unsigned long end)
 	return (void *)addr;
 }
 
-int uidfake_inline_alloc(struct uf_inline_region *region, unsigned long target)
+int tosya_inline_alloc(struct tosya_inline_region *region, unsigned long target)
 {
 	unsigned long image_start, image_end, start, end;
 	void *allocation;
@@ -114,18 +113,19 @@ int uidfake_inline_alloc(struct uf_inline_region *region, unsigned long target)
 	rc = resolve_allocators();
 	if (rc)
 		return rc;
-	image_start = uidfake_lookup_raw("_text");
-	image_end = uidfake_lookup_raw("_end");
+	image_start = tosya_lookup_raw("_text");
+	image_end = tosya_lookup_raw("_end");
 	if (!image_start || image_end <= image_start || target < image_start ||
 	    target >= image_end || image_end > ULONG_MAX - 2 * PAGE_SIZE)
 		return -ENOEXEC;
-	if (target < UF_BRANCH_REACH || target > ULONG_MAX - UF_BRANCH_REACH)
+	if (target < TOSYA_BRANCH_REACH ||
+	    target > ULONG_MAX - TOSYA_BRANCH_REACH)
 		return -ERANGE;
 
 	/* Leave a complete page of distance slack on each side. Both the entry
 	 * and a return branch anywhere in this page then fit signed imm26. */
-	start = ALIGN(target - UF_BRANCH_REACH + PAGE_SIZE, PAGE_SIZE);
-	end = (target + UF_BRANCH_REACH - PAGE_SIZE) & PAGE_MASK;
+	start = ALIGN(target - TOSYA_BRANCH_REACH + PAGE_SIZE, PAGE_SIZE);
+	end = (target + TOSYA_BRANCH_REACH - PAGE_SIZE) & PAGE_MASK;
 	image_start &= PAGE_MASK;
 	image_end = PAGE_ALIGN(image_end) + PAGE_SIZE;
 
@@ -158,7 +158,7 @@ static noinline int __nocfi seal_range(unsigned long addr, size_t size)
 	return g_x(addr, size / PAGE_SIZE);
 }
 
-int uidfake_inline_seal(struct uf_inline_region *region)
+int tosya_inline_seal(struct tosya_inline_region *region)
 {
 	int rc;
 
@@ -171,7 +171,7 @@ int uidfake_inline_seal(struct uf_inline_region *region)
 	return rc;
 }
 
-void uidfake_inline_free(struct uf_inline_region *region)
+void tosya_inline_free(struct tosya_inline_region *region)
 {
 	if (!region || !region->addr)
 		return;

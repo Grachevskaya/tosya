@@ -22,16 +22,16 @@
 #include <linux/user.h>
 #include <linux/version.h>
 
-#include "uidfake.h"
+#include "tosya.h"
 #include "kaux.h"
 #include "tier.h"
 
-static char *uf_uid_tier = "";
-static char *uf_setuid_tier = "";
-module_param_named(uid_tier, uf_uid_tier, charp, 0644);
+static char *tosya_uid_tier = "";
+static char *tosya_setuid_tier = "";
+module_param_named(uid_tier, tosya_uid_tier, charp, 0644);
 MODULE_PARM_DESC(uid_tier,
 		 "force a mechanism for the uid queries: inline, tables");
-module_param_named(setuid_tier, uf_setuid_tier, charp, 0644);
+module_param_named(setuid_tier, tosya_setuid_tier, charp, 0644);
 MODULE_PARM_DESC(
 	setuid_tier,
 	"force a mechanism for the identity change: inline, lsm, setters");
@@ -40,7 +40,7 @@ int hooks_install(void)
 {
 	int uid, setuid;
 
-	if (uidfake_patch_init())
+	if (tosya_patch_init())
 		return 0;
 
 	/*
@@ -48,27 +48,27 @@ int hooks_install(void)
 	 * syscalls asks on its USER lookup path. One find_user entry hook serves
 	 * the native and compat callers.
 	 */
-	uid = uf_tier_install(UF_TIER_UID, uf_uid_tier);
-	uidfake_status_set_uid_tier(uf_tier_name(UF_TIER_UID));
+	uid = tosya_tier_install(TOSYA_TIER_UID, tosya_uid_tier);
+	tosya_status_set_uid_tier(tosya_tier_name(TOSYA_TIER_UID));
 	if (uid)
-		pr_err("uidfake: no mechanism on this kernel can answer the uid queries\n");
+		pr_err("tosya: no mechanism on this kernel can answer the uid queries\n");
 	else
-		pr_info("uidfake: uid queries are answered by %s\n",
-			uf_tier_name(UF_TIER_UID));
+		pr_info("tosya: uid queries are answered by %s\n",
+			tosya_tier_name(TOSYA_TIER_UID));
 
 	/*
 	 * Then the identity changes. A kernel where nothing can watch them gets a
 	 * module that hides callers but never learns about new ones, and says so
 	 * loudly.
 	 */
-	setuid = uf_tier_install(UF_TIER_SETUID, uf_setuid_tier);
-	uidfake_status_set_setuid_tier(uf_tier_name(UF_TIER_SETUID));
+	setuid = tosya_tier_install(TOSYA_TIER_SETUID, tosya_setuid_tier);
+	tosya_status_set_setuid_tier(tosya_tier_name(TOSYA_TIER_SETUID));
 	if (setuid) {
-		pr_err("uidfake: identity changes are NOT watched on this kernel\n");
-		uidfake_status_note(-ENODEV);
+		pr_err("tosya: identity changes are NOT watched on this kernel\n");
+		tosya_status_note(-ENODEV);
 	} else {
-		pr_info("uidfake: id changes are watched by %s\n",
-			uf_tier_name(UF_TIER_SETUID));
+		pr_info("tosya: id changes are watched by %s\n",
+			tosya_tier_name(TOSYA_TIER_SETUID));
 	}
 
 	/* No installed family can use these tags if both attempts failed. Leave
@@ -77,7 +77,7 @@ int hooks_install(void)
 	if (uid && setuid)
 		return 0;
 
-	uidfake_tag_prime(); /* give the processes that already run their tag */
+	tosya_tag_prime(); // give the processes that already run their tag
 	return 1;
 }
 
@@ -88,7 +88,7 @@ void hooks_remove(void)
 	 * Otherwise revert the uid family, release APK records, then revert the
 	 * setuid family (the LSM slot or syscall setters).
 	 */
-	uf_tier_revert(UF_TIER_UID);
-	uidfake_apk_remove();
-	uf_tier_revert(UF_TIER_SETUID);
+	tosya_tier_revert(TOSYA_TIER_UID);
+	tosya_apk_remove();
+	tosya_tier_revert(TOSYA_TIER_SETUID);
 }

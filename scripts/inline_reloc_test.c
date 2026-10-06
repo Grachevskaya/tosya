@@ -7,10 +7,10 @@
 #include "include/inline.h"
 #include "include/inline_entry.h"
 
-#ifdef UF_INLINE_DEBUG
-extern unsigned int uf_inline_dbg_insn;
-extern unsigned int uf_inline_dbg_index;
-extern unsigned int uf_inline_dbg_stage;
+#ifdef TOSYA_INLINE_DEBUG
+extern unsigned int tosya_inline_dbg_insn;
+extern unsigned int tosya_inline_dbg_index;
+extern unsigned int tosya_inline_dbg_stage;
 #endif
 
 #include <stdio.h>
@@ -118,8 +118,8 @@ static void trampoline_refused(const unsigned int *source, size_t len,
 
 	memset(output, 0xa5, sizeof(output));
 	memcpy(before, output, sizeof(before));
-	check(uf_inline_trampoline(output, capacity, source, FROM_VA, to, len,
-				   skip, &written) == expected,
+	check(tosya_inline_trampoline(output, capacity, source, FROM_VA, to,
+				      len, skip, &written) == expected,
 	      what);
 	check(written == 0 && !memcmp(output, before, sizeof(output)),
 	      "trampoline refusal clears length and leaves output untouched");
@@ -157,9 +157,9 @@ static void trampoline_tests(void)
 		source[3] = 0xd65f03c0;
 		memset(output, 0xa5, sizeof(output));
 		written = 999;
-		check(uf_inline_trampoline(output, sizeof(output), source,
-					   FROM_VA, TO_VA, sizeof(source),
-					   entries[i].skip, &written) == 0,
+		check(tosya_inline_trampoline(output, sizeof(output), source,
+					      FROM_VA, TO_VA, sizeof(source),
+					      entries[i].skip, &written) == 0,
 		      "plain and BTI/PAC entries build a short trampoline");
 		/* This checks PAC instruction preservation, not hardware authentication. */
 		check(written == prefix + 4 && !memcmp(output, source, prefix),
@@ -172,14 +172,14 @@ static void trampoline_tests(void)
 		      "trampoline does not copy the native body");
 		trampoline_refused(source, sizeof(source), entries[i].skip,
 				   FROM_VA + (1UL << 28), sizeof(output),
-				   UF_INLINE_ERANGE,
+				   TOSYA_INLINE_ERANGE,
 				   "out-of-range native resume is refused");
 		trampoline_refused(
 			source, sizeof(source), entries[i].skip, TO_VA, prefix,
-			UF_INLINE_ESIZE,
+			TOSYA_INLINE_ESIZE,
 			"output must fit the prefix and resume branch");
 		trampoline_refused(source, sizeof(source), entries[i].skip ^ 4,
-				   TO_VA, sizeof(output), UF_INLINE_EINSN,
+				   TO_VA, sizeof(output), TOSYA_INLINE_EINSN,
 				   "patch offset must match the entry landing");
 	}
 	source[0] = 0xd503245f; /* BTI c */
@@ -188,16 +188,17 @@ static void trampoline_tests(void)
 		source[2] = reentries[i];
 		trampoline_refused(
 			source, sizeof(source), 4, TO_VA, sizeof(output),
-			UF_INLINE_EINSN,
+			TOSYA_INLINE_EINSN,
 			"prefix reentry or unresolved body branch is refused");
 	}
 	source[2] = 0xd503201f;
 	source[1] = 0x14000000;
 	trampoline_refused(source, sizeof(source), 4, TO_VA, sizeof(output),
-			   UF_INLINE_EINSN,
+			   TOSYA_INLINE_EINSN,
 			   "an existing branch at the patch site is refused");
 	source[1] = 0x51000448;
-	trampoline_refused(source, 8, 4, TO_VA, sizeof(output), UF_INLINE_ESIZE,
+	trampoline_refused(source, 8, 4, TO_VA, sizeof(output),
+			   TOSYA_INLINE_ESIZE,
 			   "a trampoline needs a native body to resume");
 }
 
@@ -210,13 +211,13 @@ int main(void)
 
 	memset(copy, 0, sizeof copy);
 	memcpy(source, kFindUser, LEN);
-	rc = uf_inline_relocate(copy, sizeof copy, source, FROM_VA, TO_VA, LEN,
-				&out);
+	rc = tosya_inline_relocate(copy, sizeof copy, source, FROM_VA, TO_VA,
+				   LEN, &out);
 	if (rc != 0) {
-#ifdef UF_INLINE_DEBUG
+#ifdef TOSYA_INLINE_DEBUG
 		printf("  relocation returned %d (stage %u, index %u, insn 0x%08x)\n",
-		       rc, uf_inline_dbg_stage, uf_inline_dbg_index,
-		       uf_inline_dbg_insn);
+		       rc, tosya_inline_dbg_stage, tosya_inline_dbg_index,
+		       tosya_inline_dbg_insn);
 #else
 		printf("  relocation returned %d\n", rc);
 #endif
@@ -248,7 +249,7 @@ int main(void)
 	check(contains_word(copy, out, 0xd50323bfu), "autiasp copied");
 	check(contains_word(copy, out, 0xd65f03c0u), "ret copied");
 
-	if (getenv("UF_DUMP")) {
+	if (getenv("TOSYA_DUMP")) {
 		size_t k;
 
 		for (k = 0; k < out / 4; k++) {
@@ -273,18 +274,18 @@ int main(void)
 							 0xd65f03c0u };
 		unsigned int buf[16];
 
-		rc = uf_inline_relocate(buf, sizeof buf, literal, FROM_VA, 0, 8,
-					&out);
-		check(rc == UF_INLINE_EINSN, "a literal load is refused");
+		rc = tosya_inline_relocate(buf, sizeof buf, literal, FROM_VA, 0,
+					   8, &out);
+		check(rc == TOSYA_INLINE_EINSN, "a literal load is refused");
 	}
 	{
 		static const unsigned int none[2] = { 0xd65f03c0u,
 						      0xd65f03c0u };
 		unsigned int buf[16];
 
-		rc = uf_inline_relocate(buf, sizeof buf, none, FROM_VA, 0, 8,
-					&out);
-		check(rc == UF_INLINE_OK, "a plain function is accepted");
+		rc = tosya_inline_relocate(buf, sizeof buf, none, FROM_VA, 0, 8,
+					   &out);
+		check(rc == TOSYA_INLINE_OK, "a plain function is accepted");
 	}
 
 	{
@@ -293,17 +294,17 @@ int main(void)
 		unsigned long site = 0xffffff8008000000UL + 0x17986cUL;
 		unsigned long hook = site - (1UL << 26);
 
-		rc = uf_inline_entry(&patch, sizeof patch, site, hook);
-		check(rc == (int)UF_INLINE_ENTRY, "an entry patch is built");
+		rc = tosya_inline_entry(&patch, sizeof patch, site, hook);
+		check(rc == (int)TOSYA_INLINE_ENTRY, "an entry patch is built");
 		check((patch & 0xfc000000u) == 0x14000000u, "single B emitted");
 		imm26 = patch & 0x03ffffffu;
 		if (imm26 & (1L << 25))
 			imm26 -= 1L << 26;
 		check(site + (unsigned long)(imm26 * 4) == hook,
 		      "B reaches the hook");
-		rc = uf_inline_entry(&patch, sizeof patch, site,
-				     site + (1UL << 27));
-		check(rc == UF_INLINE_ERANGE,
+		rc = tosya_inline_entry(&patch, sizeof patch, site,
+					site + (1UL << 27));
+		check(rc == TOSYA_INLINE_ERANGE,
 		      "a hook out of branch range is refused");
 	}
 

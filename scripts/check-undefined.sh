@@ -2,12 +2,8 @@
 # Fail if the module needs a symbol the kernel does not export.
 #
 # The authority is the DDK's per-KMI Module.symvers -- the same table kbuild itself uses.
-# One lookup per symbol, no source-tree scans (the first version grepped ten kernel trees per
-# symbol, which was slow and wrong about macros like EXPORT_SYMBOL_NS).
-#
-# This class of mistake is real: __builtin___clear_cache() lowered to __clear_cache(), which
-# is not exported, and the module then refused to load on the device with
-#   "Unknown symbol __clear_cache (-2)"
+# One lookup per symbol, no source-tree scans: a text scan is both slow and wrong about macros
+# like EXPORT_SYMBOL_NS.
 #
 #   scripts/check-undefined.sh [module.ko ...]
 set -euo pipefail
@@ -20,7 +16,7 @@ KOS=("$@")
 
 fail=0
 for ko in "${KOS[@]}"; do
-  kmi=$(basename "$ko" _arm64_hma_uidfake.ko)
+  kmi=$(basename "$ko" _arm64_tosya.ko)
   symvers="$ddk/kdir/$kmi/Module.symvers"
   if [ ! -f "$symvers" ]; then
     echo "FAIL $kmi: no $symvers"
