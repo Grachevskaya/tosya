@@ -48,6 +48,12 @@ int hooks_install(void)
 	 * syscalls asks on its USER lookup path. One find_user entry hook serves
 	 * the native and compat callers.
 	 */
+	/* The fork side: what the zygote parsed for a child is taken out of the zygote before
+	 * anything else can inherit it. Best effort -- a kernel that refuses the entry hook costs
+	 * nothing but the cleanup. */
+	(void) tosya_fork_scrub_install();
+	(void) tosya_unlock_inode_install();
+
 	uid = tosya_tier_install(TOSYA_TIER_UID, tosya_uid_tier);
 	tosya_status_set_uid_tier(tosya_tier_name(TOSYA_TIER_UID));
 	if (uid)

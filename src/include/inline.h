@@ -20,6 +20,9 @@
  */
 #define TOSYA_INLINE_INSN 4u
 #define TOSYA_INLINE_MAX_SOURCE 1024u
+/* The largest function the relocator will take: kernel_clone is 1084 bytes, so this is the
+ * only number that had to move for it -- nothing else is sized from it but the work array. */
+#define TOSYA_INLINE_MAX_FUNC 2048u
 #define TOSYA_INLINE_MAX_COPY (TOSYA_INLINE_MAX_SOURCE * 4u + TOSYA_INLINE_INSN)
 
 #define TOSYA_INLINE_OK 0

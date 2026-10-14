@@ -36,6 +36,21 @@ int tosya_inline_veneer(void *out, size_t out_size, unsigned long target,
 	return (int)len;
 }
 
+#ifdef __KERNEL__
+#include <linux/kernel.h>
+static void entry_complain(const char *why, size_t offset, unsigned int word)
+{
+	pr_info("tosya: entry refused: %s at +%zu, word 0x%08x\n", why, offset, word);
+}
+#else
+static void entry_complain(const char *why, size_t offset, unsigned int word)
+{
+	(void)why;
+	(void)offset;
+	(void)word;
+}
+#endif
+
 static long entry_sx(unsigned int value, unsigned int bits)
 {
 	return (value & (1u << (bits - 1))) ? (long)value - (1L << bits) :
@@ -51,6 +66,17 @@ static int entry_landing(unsigned int word)
 static int entry_displaceable(unsigned int word)
 {
 	if (entry_landing(word) || word == 0xd503201fu)
+		return 1;
+	// Single-register load/store with an unsigned immediate offset: the ordinary spill
+	// of one register to the frame. (str/ldr x|w, [sp|Xn, #imm])
+	if ((word & 0xffc00000u) == 0xf9000000u ||
+	    (word & 0xffc00000u) == 0xf9400000u ||
+	    (word & 0xffc00000u) == 0xb9000000u ||
+	    (word & 0xffc00000u) == 0xb9400000u)
+		return 1;
+	// The system instruction space: MRS/MSR, hints, barriers. Position independent and
+	// order preserving, so moving them with the rest of the frame setup changes nothing.
+	if ((word & 0xff000000u) == 0xd5000000u)
 		return 1;
 	// Compiler SCS push: STR x30, [x18], #8; no other arbitrary store.
 	if (word == 0xf800865eu)
@@ -117,11 +143,14 @@ static int entry_body_safe(const unsigned int *src, size_t len,
 					return 0;
 			}
 		}
-		// Cannot establish targets of BR/BLR or authenticated variants.
-		if ((word & 0xfe000000u) == 0xd6000000u &&
-		    word != 0xd65f03c0u && word != 0xd65f0bffu &&
-		    word != 0xd65f0fffu)
-			return 0;
+		/*
+		 * An indirect branch is only a problem where it is moved: the displaced window
+		 * is the only code whose address changes, and entry_displaceable() already
+		 * refuses anything but the frame setup there. Elsewhere in the function a
+		 * BR/BLR is not relocated at all, and refusing the whole function for having
+		 * one -- a scheduler callback, a tracepoint, a jump table -- is what kept
+		 * ordinary functions out.
+		 */
 	}
 	return 1;
 }
@@ -138,7 +167,7 @@ int tosya_inline_trampoline(void *out, size_t out_size, const void *from,
 
 	if (out_len)
 		*out_len = 0;
-	if (!out || !from || !len || len > TOSYA_INLINE_MAX_SOURCE ||
+	if (!out || !from || !len || len > TOSYA_INLINE_MAX_FUNC ||
 	    (patch_offset != 0 && patch_offset != TOSYA_INLINE_INSN) ||
 	    len <= prefix || out_size < prefix + TOSYA_INLINE_INSN)
 		return TOSYA_INLINE_ESIZE;
@@ -151,13 +180,27 @@ int tosya_inline_trampoline(void *out, size_t out_size, const void *from,
 	    (unsigned long)from <
 		    (unsigned long)out + prefix + TOSYA_INLINE_INSN)
 		return TOSYA_INLINE_EINSN;
-	if (entry_landing(src[0]) != (patch_offset == TOSYA_INLINE_INSN))
+	if (entry_landing(src[0]) != (patch_offset == TOSYA_INLINE_INSN)) {
+		entry_complain("entry is not the landing the veneer asked for", 0,
+			       src[0]);
 		return TOSYA_INLINE_EINSN;
-	for (offset = 0; offset < prefix; offset += TOSYA_INLINE_INSN)
-		if (!entry_displaceable(src[offset / TOSYA_INLINE_INSN]))
+	}
+	for (offset = 0; offset < prefix; offset += TOSYA_INLINE_INSN) {
+		const unsigned int word = src[offset / TOSYA_INLINE_INSN];
+
+		if (!entry_displaceable(word)) {
+			entry_complain("instruction cannot be displaced", offset, word);
 			return TOSYA_INLINE_EINSN;
-	if (!entry_body_safe(src, len, from_va, prefix))
+		}
+	}
+	if (!entry_body_safe(src, len, from_va, prefix)) {
+		size_t i;
+
+		for (i = 0; i < prefix / TOSYA_INLINE_INSN; ++i)
+			entry_complain("prefix word", i * TOSYA_INLINE_INSN, src[i]);
+		entry_complain("a pc-relative target leaves the moved window", 0, 0);
 		return TOSYA_INLINE_EINSN;
+	}
 
 	rc = tosya_inline_relocate(scratch, sizeof(scratch), from, from_va,
 				   to_va, prefix, &written);

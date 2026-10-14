@@ -128,6 +128,11 @@ u32 policy_lookup_as(uid_t caller, uid_t target);
  * the generation of this upload. finish parks every entry outside that generation and
  * returns how many stayed.
  */
+struct inode;
+/* Matching a token costs its length, not the size of the list. Returns the matched length. */
+u32 tosya_names_trie_match(const u8 *name, u32 len, u32 *seed_out);
+bool tosya_apk_shadow_apply(struct inode *inode);
+void tosya_apk_shadow_sweep(void);
 int tosya_apk_stream(u32 op, u32 uid, u32 dev, u64 ino, const char *path,
 		     u32 bytes);
 u32 tosya_apk_stream_finish(void);
@@ -240,15 +245,6 @@ static __always_inline u64 tosya_select(u64 when_true, u64 when_false,
 #endif
 }
 
-int tosya_apk_apply(const u32 *blob,
-		    u32 n); // n * (st_dev, ino_lo, ino_hi, uid)
-/*
- * blob: u32 n, then n * (action, uid, off, len), then the paths those offsets
- * point into. action 0 replaces the open of the base.apk at that path, 1 puts
- * it back, so the userspace half can send only what changed. A replaced inode names a
- * waiting isolated child from the app the apk belongs to.
- */
-int tosya_apk_apply(const u32 *blob, u32 len);
 void tosya_apk_remove(void); // put every inode back (module exit)
 void tosya_tag_adopt(u32 old_uid, u32 new_uid);
 void tosya_tag_prime(void);
@@ -275,6 +271,18 @@ void tosya_status_set_setuid_tier(const char *name);
 void tosya_status_set_apks(unsigned int inodes, unsigned int expected,
 			   unsigned int failed);
 void tosya_status_note(int error);
+
+/* The hidden names travel in the clear, for the cleanup that runs inside the zygote. */
+void tosya_names_apply(const u32 *words, u32 nwords);
+extern u32 g_names_gen;
+extern unsigned int tosya_scrub_in_place, tosya_scrub_runs, tosya_scrub_hits,
+	tosya_scrub_names;
+u32 tosya_names_bytes(void);
+u32 tosya_names_copy(void *out, u32 out_size);
+void tosya_names_free(void);
+void tosya_fork_scrub(long pid);
+int tosya_fork_scrub_install(void);
+int tosya_unlock_inode_install(void);
 
 int policy_init(void);
 void policy_free(void);

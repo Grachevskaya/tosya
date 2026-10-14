@@ -3,6 +3,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/sched.h>
+#include <linux/sched/task.h>
 #include <linux/string.h>
 #include <linux/uidgid.h>
 #include <linux/user.h>
@@ -14,7 +15,8 @@
 #include "inline_alloc.h"
 #include "tier.h"
 
-#define TOSYA_INLINE_STORAGE_SIZE 16
+// Displaced prefix plus the veneer that returns from it.
+#define TOSYA_INLINE_STORAGE_SIZE 64
 #define TOSYA_BTI_JC 0xd50324dfu
 #define TOSYA_PACIASP 0xd503233fu
 #define TOSYA_PACIBSP 0xd503237fu
@@ -49,7 +51,12 @@ int tosya_setuid_inline_hook(struct cred *, const struct cred *, int);
 					   ".size " name ", . - " name "\n"    \
 					   ".size " original ", . - " original \
 					   "\n"
-asm(".pushsection \".text.tosya_inline\",\"ax\"\n" TOSYA_ASM_COPY(
+asm(".pushsection \".text.tosya_inline\",\"ax\"\n" TOSYA_ASM_COPY("g_unlock_inode_copy", "tosya_unlock_inode_orig")
+	TOSYA_ASM_STUB("tosya_unlock_inode_stub", "", "tosya_unlock_inode_hook")
+	TOSYA_ASM_STUB("tosya_unlock_inode_pacia_stub", "\tautiasp\n",
+		       "tosya_unlock_inode_hook")
+	TOSYA_ASM_STUB("tosya_unlock_inode_pacib_stub", "\tautibsp\n",
+		       "tosya_unlock_inode_hook") TOSYA_ASM_COPY(
 	"g_find_user_copy",
 	"tosya_find_user_orig") TOSYA_ASM_STUB("tosya_find_user_stub", "",
 					       "tosya_find_user_hook")
@@ -66,7 +73,14 @@ asm(".pushsection \".text.tosya_inline\",\"ax\"\n" TOSYA_ASM_COPY(
 				    TOSYA_ASM_STUB(
 					    "tosya_setuid_pacib_stub",
 					    "\tautibsp\n",
-					    "tosya_setuid_inline_hook") ".popsection\n");
+					    "tosya_setuid_inline_hook")
+		TOSYA_ASM_COPY("g_wake_up_copy", "tosya_wake_up_orig")
+			TOSYA_ASM_STUB("tosya_wake_up_stub", "", "tosya_wake_up_hook")
+				TOSYA_ASM_STUB("tosya_wake_up_pacia_stub", "\tautiasp\n",
+					       "tosya_wake_up_hook")
+					TOSYA_ASM_STUB("tosya_wake_up_pacib_stub", "\tautibsp\n",
+						       "tosya_wake_up_hook")
+						".popsection\n");
 
 __attribute__((hot)) noinline struct user_struct *
 tosya_find_user_hook(kuid_t uid)
@@ -165,7 +179,7 @@ static int inline_errno(int rc)
  * instructions are copied; the rest runs at its original kernel address. */
 static int inline_install(struct tosya_inline_hook *hook)
 {
-	static u32 source[TOSYA_INLINE_MAX_SOURCE / TOSYA_INLINE_INSN];
+	static u32 source[TOSYA_INLINE_MAX_FUNC / TOSYA_INLINE_INSN];
 	static u32 scratch[TOSYA_INLINE_STORAGE_SIZE / TOSYA_INLINE_INSN];
 	unsigned long addr = 0, size = 0, stub = hook->stub;
 	size_t written = 0, skip = 0;
@@ -176,10 +190,17 @@ static int inline_install(struct tosya_inline_hook *hook)
 	BUILD_BUG_ON(TOSYA_INLINE_TRAMPOLINE_MAX + TOSYA_INLINE_INSN >
 		     TOSYA_INLINE_STORAGE_SIZE);
 	BUILD_BUG_ON(TOSYA_INLINE_VENEER_SIZE > TOSYA_INLINE_STORAGE_SIZE);
+	BUILD_BUG_ON(2 * TOSYA_INLINE_INSN + TOSYA_INLINE_TRAMPOLINE_MAX >
+		     TOSYA_INLINE_STORAGE_SIZE);
 	if (hook->installed)
 		return 0;
 	if (!tosya_symbol_range(hook->name, &addr, &size))
 		return -ENOENT;
+	/* The size is the distance to the next symbol, which can be a section boundary far past
+	 * the function. It bounds the read and the scan and nothing else, so it is clamped
+	 * first: what is left is the real end of the function, found by the scan itself. */
+	if (size > TOSYA_INLINE_MAX_FUNC)
+		size = TOSYA_INLINE_MAX_FUNC;
 	if ((addr & 3) || (size & 3) || size < TOSYA_INLINE_INSN ||
 	    size > sizeof(source))
 		return -E2BIG;
@@ -306,6 +327,95 @@ static int inline_install(struct tosya_inline_hook *hook)
 
 free_region:
 	tosya_inline_free(&hook->region);
+	return rc;
+}
+
+/*
+ * The forking side: wake_up_new_task. Every fork path the kernel has -- clone, clone3, the 32-bit
+ * entry, vfork, kernel_thread -- reaches it, and it is the one point in the parent after
+ * copy_process has built the new task. Our work runs after it returns.
+ */
+extern u32 g_wake_up_copy[];
+extern void tosya_wake_up_orig(struct task_struct *p);
+extern void tosya_wake_up_stub(struct task_struct *p);
+extern void tosya_wake_up_pacia_stub(struct task_struct *p);
+extern void tosya_wake_up_pacib_stub(struct task_struct *p);
+void tosya_wake_up_hook(struct task_struct *p);
+
+static struct tosya_inline_hook g_wake_up = {
+	.name = "wake_up_new_task",
+	.copy = g_wake_up_copy,
+	.hook = (unsigned long)tosya_wake_up_hook,
+	.stub = (unsigned long)tosya_wake_up_stub,
+	.pacia_stub = (unsigned long)tosya_wake_up_pacia_stub,
+	.pacib_stub = (unsigned long)tosya_wake_up_pacib_stub,
+};
+
+static bool tosya_fork_scrub_on = true;
+module_param_named(fork_scrub, tosya_fork_scrub_on, bool, 0644);
+MODULE_PARM_DESC(fork_scrub,
+		 "take hidden names out of the parent after a fork (default 1)");
+
+__attribute__((hot)) noinline void tosya_wake_up_hook(struct task_struct *p)
+{
+	tosya_wake_up_orig(p);
+	if (tosya_fork_scrub_on)
+		tosya_fork_scrub(task_pid_vnr(p));
+}
+
+int tosya_fork_scrub_install(void)
+{
+	int rc = inline_install(&g_wake_up);
+
+	if (rc)
+		pr_info("tosya: the fork cleanup is not in place (%d)\n", rc);
+	else
+		pr_info("tosya: the fork cleanup is in place\n");
+	if (rc)
+		tosya_status_note(rc);
+	tosya_scrub_in_place = rc == 0;
+	return rc;
+}
+
+/*
+ * The inode cache. A shadow lives in the inode's i_fop, and an inode can be reclaimed, so the
+ * replacement has to be put back when one is built again -- and this is where that happens: every
+ * newly read inode passes here, with its file operations already set by the file system and not
+ * yet unlocked, so the swap is made before anything can open it.
+ */
+extern u32 g_unlock_inode_copy[];
+extern void tosya_unlock_inode_orig(struct inode *inode);
+extern void tosya_unlock_inode_stub(struct inode *inode);
+extern void tosya_unlock_inode_pacia_stub(struct inode *inode);
+extern void tosya_unlock_inode_pacib_stub(struct inode *inode);
+void tosya_unlock_inode_hook(struct inode *inode);
+
+static struct tosya_inline_hook g_unlock_inode = {
+	.name = "unlock_new_inode",
+	.copy = g_unlock_inode_copy,
+	.hook = (unsigned long)tosya_unlock_inode_hook,
+	.stub = (unsigned long)tosya_unlock_inode_stub,
+	.pacia_stub = (unsigned long)tosya_unlock_inode_pacia_stub,
+	.pacib_stub = (unsigned long)tosya_unlock_inode_pacib_stub,
+};
+
+__attribute__((hot)) noinline void tosya_unlock_inode_hook(struct inode *inode)
+{
+	/*
+	 * After the original, never before: while I_NEW is still set the file system has not
+	 * finished with the inode, and a write into i_fop there races its own -- the one window
+	 * the shadow code refuses everywhere else.
+	 */
+	tosya_unlock_inode_orig(inode);
+	tosya_apk_shadow_apply(inode);
+}
+
+int tosya_unlock_inode_install(void)
+{
+	int rc = inline_install(&g_unlock_inode);
+
+	if (rc == 0)
+		pr_info("tosya: a new inode is shadowed before it is seen\n");
 	return rc;
 }
 

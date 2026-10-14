@@ -16,6 +16,7 @@
  */
 #include <linux/atomic.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/rcupdate.h>
 /*
@@ -29,6 +30,7 @@ struct cred;
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/user.h>
+#include <linux/vmalloc.h>
 
 #include "tosya.h"
 
@@ -82,6 +84,241 @@ static struct policy g_empty = {
 /* The published snapshot: one pointer swap, so a query reads a consistent
  * whole. */
 struct policy *g_pol __rcu = &g_empty;
+
+/*
+ * The hidden names, for the cleanup the zygote runs after a fork. They are compared as they
+ * are, so they are kept as they arrive, behind the same kind of RCU snapshot the policy uses:
+ * only kernel memory holds them, so a hash would protect nothing here.
+ *
+ * The list is flat: len, seed and the name bytes one after another, len a multiple of four, so
+ * a reader walks it without an index.
+ */
+struct tosya_names {
+	u32 count;
+	u32 bytes;
+	char data[];
+};
+
+static struct tosya_names __rcu *g_names;
+/* Bumped when a list is stored. A reader that only needs to know "is there a list at all"
+ * reads this, not the snapshot. */
+u32 g_names_gen;
+
+/*
+ * The hidden names as a tree. A token is matched by walking it once, so the cost follows the
+ * token's length rather than the number of names: a list of a thousand names costs the same as a
+ * list of ten. The alphabet is what a package name is made of, so kids stay few and are searched
+ * in place.
+ */
+struct tosya_trie_node {
+	u32 seed; /* a leaf's expansion seed, plus one; zero means "not a name" */
+	u32 nkids;
+	u32 kids; /* offset of the node's kid pairs in g_trie_kids */
+};
+
+struct tosya_trie_kid {
+	u8 sym;
+	u8 pad[3];
+	u32 node;
+};
+
+struct tosya_trie {
+	u32 n_nodes;
+	u32 n_kids;
+	u32 root;
+	struct tosya_trie_node nodes[];
+};
+
+#define TOSYA_TRIE_MAX_NODES 65536u
+#define TOSYA_TRIE_MAX_KIDS 65536u
+
+static struct tosya_trie __rcu *g_trie;
+static struct tosya_trie_kid g_trie_kids[TOSYA_TRIE_MAX_KIDS];
+
+static int tosya_trie_sym(u8 c)
+{
+	if (c >= 'a' && c <= 'z')
+		return c - 'a';
+	if (c >= '0' && c <= '9')
+		return 26 + (c - '0');
+	if (c == '.')
+		return 36;
+	if (c == '_')
+		return 37;
+	if (c == '-')
+		return 38;
+	return -1;
+}
+
+static void tosya_trie_build(const char *records, u32 bytes)
+{
+	struct tosya_trie *t;
+	u32 off = 0, n_nodes = 1, n_kids = 0;
+
+	t = kvzalloc(sizeof(*t) + (size_t)TOSYA_TRIE_MAX_NODES * sizeof(t->nodes[0]),
+		     GFP_KERNEL);
+	if (t == NULL)
+		return;
+	t->n_nodes = 1;
+	t->root = 0;
+	while (off + 8 <= bytes) {
+		u32 len, seed, i, node = 0;
+
+		memcpy(&len, records + off, 4);
+		memcpy(&seed, records + off + 4, 4);
+		off += 8 + ((len + 3u) & ~3u);
+		if (len == 0 || off > bytes)
+			break;
+		for (i = 0; i < len; i++) {
+			int sym = tosya_trie_sym((u8)records[off - ((len + 3u) & ~3u) + i]);
+			u32 k, next = 0;
+
+			if (sym < 0)
+				break;
+			for (k = 0; k < t->nodes[node].nkids; k++)
+				if (g_trie_kids[t->nodes[node].kids + k].sym == (u8)sym)
+					next = g_trie_kids[t->nodes[node].kids + k].node;
+			if (next == 0) {
+				if (n_nodes >= TOSYA_TRIE_MAX_NODES || n_kids >= TOSYA_TRIE_MAX_KIDS)
+					break;
+				next = n_nodes++;
+				g_trie_kids[n_kids].sym = (u8)sym;
+				g_trie_kids[n_kids].node = next;
+				if (t->nodes[node].nkids == 0)
+					t->nodes[node].kids = n_kids;
+				n_kids++;
+				t->nodes[node].nkids++;
+			}
+			node = next;
+		}
+		t->nodes[node].seed = seed + 1u;
+	}
+	t->n_nodes = n_nodes;
+	t->n_kids = n_kids;
+	rcu_assign_pointer(g_trie, t);
+}
+
+u32 tosya_names_trie_match(const u8 *name, u32 len, u32 *seed_out)
+{
+	struct tosya_trie *t;
+	u32 node = 0, i;
+
+	rcu_read_lock();
+	t = rcu_dereference(g_trie);
+	if (t == NULL) {
+		rcu_read_unlock();
+		return 0;
+	}
+	for (i = 0; i < len && node < t->n_nodes; i++) {
+		int sym = tosya_trie_sym(name[i]);
+		u32 k, next = 0;
+
+		if (sym < 0)
+			break;
+		for (k = 0; k < t->nodes[node].nkids; k++)
+			if (g_trie_kids[t->nodes[node].kids + k].sym == (u8)sym)
+				next = g_trie_kids[t->nodes[node].kids + k].node;
+		if (next == 0)
+			break;
+		node = next;
+	}
+	if (i == len && t->nodes[node].seed != 0 && seed_out != NULL)
+		*seed_out = t->nodes[node].seed - 1u;
+	rcu_read_unlock();
+	return i == len && t->nodes[node].seed != 0 ? len : 0;
+}
+
+void tosya_names_apply(const u32 *words, u32 nwords)
+{
+	struct tosya_names *nn;
+	struct tosya_names *old;
+	u32 at = 0, off = 0, count = 0, bytes = 0, i;
+
+	while (at + 2 <= nwords) {
+		u32 len = words[at];
+		u32 padded = (len + 3u) & ~3u;
+
+		/* The length is the name itself; what carries it is rounded up. A length
+		 * that is not a multiple of four is the normal case, not an error. */
+		if (len == 0 || len > 256 || at + 2 + padded / 4u > nwords)
+			break;
+		++count;
+		bytes += 8 + padded;
+		at += 2 + padded / 4u;
+	}
+	if (count == 0)
+		return;
+
+	nn = kzalloc(sizeof(*nn) + bytes, GFP_KERNEL);
+	if (nn == NULL)
+		return;
+	nn->count = count;
+	nn->bytes = bytes;
+
+	at = 0;
+	for (i = 0; i < count; ++i) {
+		u32 len = words[at];
+		u32 seed = words[at + 1];
+		u32 padded = (len + 3u) & ~3u;
+
+		memcpy(nn->data + off, &len, 4);
+		memcpy(nn->data + off + 4, &seed, 4);
+		memcpy(nn->data + off + 8, &words[at + 2], padded);
+		off += 8 + padded;
+		at += 2 + padded / 4u;
+	}
+
+	tosya_trie_build(&nn->data[0], nn->bytes);
+	old = rcu_replace_pointer(g_names, nn, true);
+	WRITE_ONCE(g_names_gen, g_names_gen + 1u);
+	synchronize_rcu();
+	kfree(old);
+}
+
+/*
+ * Copy the list out for a caller that has to sleep afterwards -- reading a process's pages
+ * does. Returns the bytes copied, or zero when there is nothing to clean by.
+ */
+/* How much the list needs, so a reader can size its buffer instead of guessing and being
+ * handed nothing when it guessed small. */
+u32 tosya_names_bytes(void)
+{
+	struct tosya_names *n;
+	u32 bytes = 0;
+
+	rcu_read_lock();
+	n = rcu_dereference(g_names);
+	if (n != NULL)
+		bytes = n->bytes;
+	rcu_read_unlock();
+	return bytes;
+}
+
+u32 tosya_names_copy(void *out, u32 out_size)
+{
+	struct tosya_names *n;
+	u32 bytes = 0;
+
+	rcu_read_lock();
+	n = rcu_dereference(g_names);
+	if (n != NULL && n->bytes <= out_size) {
+		memcpy(out, n->data, n->bytes);
+		bytes = n->bytes;
+	}
+	rcu_read_unlock();
+	return bytes;
+}
+
+void tosya_names_free(void)
+{
+	struct tosya_names *old;
+
+	old = rcu_replace_pointer(g_names, NULL, true);
+	if (old != NULL) {
+		synchronize_rcu();
+		kfree(old);
+	}
+}
 
 struct apply_pair {
 	u32 caller;

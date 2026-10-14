@@ -13,6 +13,7 @@
  * the only thing the hook has to trust, and it checks for its own function
  * before reading anything behind it.
  */
+#include <linux/vmalloc.h>
 #include <linux/dcache.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
@@ -28,11 +29,19 @@
 #include "kaux.h"
 #include <linux/string.h> /* strcmp: a stream entry is claimed by its path */
 
+/*
+ * The apk side, off as a whole while the crash that comes with it is chased: with this at 0 no
+ * record is taken, no inode is asked for, nothing is replaced, and nothing is swept. Flip it to 1
+ * to bring the whole mechanism back -- the code below is untouched.
+ */
+#define TOSYA_APK_SHADOW 1
+
 // the host test has no inodes to shadow
 #ifndef TOSYA_HOST_TEST
 /* TOSYA_SHADOW_BEGIN: scripts/extract_shadow.py lifts this block into the host test */
 // KAUX_OP_*: the actions a stream record carries
 #include "kaux.h"
+#include <linux/mm.h>
 
 /*
  * One record, and one table inside it, for one file: a record is never given to
@@ -54,11 +63,9 @@ struct tosya_shadow {
 	int (*orig_open)(struct inode *, struct file *);
 	u32 app;
 	/*
-	 * The numbers a helper can name this file by, so it can ask for it back after the path it came
-	 * from is gone, and the path itself, kept so the table can be put back at unload: no inode is
-	 * held, so the one behind it has to be found again by name.
+	 * The numbers a helper names this file by, and nothing else: the table is learned from the
+	 * first inode the rule meets, so no path is ever resolved for a push.
 	 */
-	char *path;
 	u32 dev;
 	u64 ino;
 	/*
@@ -82,8 +89,186 @@ static struct tosya_shadow *g_shadow[TOSYA_APK_MAX]; // installed, in use
 static u32 g_shadow_n;
 
 static DEFINE_MUTEX(g_shadow_lock);
-static int (*g_kern_path)(const char *name, unsigned int flags,
-			  struct path *path);
+/*
+ * The index the hot paths use: inode creation asks "is this one of ours" for every new inode,
+ * so the answer has to be one or two memory reads, not a walk over the table. Open addressing,
+ * power of two, and a key is only ever removed by parking its entry.
+ */
+#define TOSYA_INDEX_MIN_BITS 12u
+#define TOSYA_INDEX_MAX_BITS 21u
+
+struct tosya_index_slot {
+	u32 dev;
+	u64 ino;
+	struct tosya_shadow *s;
+};
+
+/*
+ * One table is one object, and it never changes after it is published: the size and the slots are
+ * read together by callers that take nothing -- every new inode asks whether it is ours, and that
+ * is a hot path. A table that has been replaced stays where it is; nothing is handed back to the
+ * allocator while a reader may still be walking it.
+ */
+struct tosya_index {
+	u32 bits;
+	u32 used;
+	struct tosya_index_slot *slot;
+};
+
+static struct tosya_index __rcu *g_index;
+static struct tosya_index *g_index_all[TOSYA_INDEX_MAX_BITS + 2u];
+static u32 g_index_all_n;
+
+#define TOSYA_INDEX_TOMB ((struct tosya_shadow *)1UL)
+
+static u32 index_hash(u32 bits, u32 dev, u64 ino)
+{
+	u64 h = (u64)dev * 0x9e3779b97f4a7c15ULL ^ (ino + 0x165667b19e3779f9ULL);
+
+	return (u32)(h >> (64 - bits));
+}
+
+static struct tosya_index *index_new(u32 bits)
+{
+	struct tosya_index *ix = kzalloc(sizeof(*ix), GFP_KERNEL);
+
+	if (ix == NULL)
+		return NULL;
+	ix->slot = kvzalloc((size_t)(1u << bits) * sizeof(*ix->slot), GFP_KERNEL);
+	if (ix->slot == NULL) {
+		kfree(ix);
+		return NULL;
+	}
+	ix->bits = bits;
+	return ix;
+}
+
+static struct tosya_index *index_grow_locked(void);
+static void index_put(u32 dev, u64 ino, struct tosya_shadow *s);
+
+static struct tosya_shadow *index_get(u32 dev, u64 ino)
+{
+	struct tosya_shadow *found = NULL;
+	struct tosya_index *ix;
+	u32 span, mask, i, n;
+
+	/*
+	 * One snapshot for the whole walk: the bits and the slots come from the same object, so a
+	 * table that is replaced underneath this call cannot make it read past its end.
+	 */
+	rcu_read_lock();
+	ix = rcu_dereference(g_index);
+	if (ix != NULL) {
+		span = 1u << ix->bits;
+		mask = span - 1u;
+		i = index_hash(ix->bits, dev, ino);
+		for (n = 0; n < span; n++) {
+			struct tosya_index_slot *slot = &ix->slot[(i + n) & mask];
+
+			if (slot->s == NULL)
+				break;
+			if (slot->s != TOSYA_INDEX_TOMB && slot->dev == dev &&
+			    slot->ino == ino) {
+				found = slot->s;
+				break;
+			}
+		}
+	}
+	rcu_read_unlock();
+	return found;
+}
+
+static struct tosya_index *index_grow_locked(void)
+{
+	struct tosya_index *old;
+	struct tosya_index *ni;
+	u32 bits, i;
+
+	old = rcu_dereference_protected(g_index, lockdep_is_held(&g_shadow_lock));
+	if (old != NULL && old->bits >= TOSYA_INDEX_MAX_BITS)
+		return NULL;
+	bits = old != NULL ? old->bits + 1u : TOSYA_INDEX_MIN_BITS;
+	ni = index_new(bits);
+	if (ni == NULL)
+		return NULL;
+	for (i = 0; old != NULL && i < (1u << old->bits); i++) {
+		u32 span = 1u << ni->bits, mask = span - 1u;
+		u32 j, k;
+
+		if (old->slot[i].s == NULL || old->slot[i].s == TOSYA_INDEX_TOMB)
+			continue;
+		j = index_hash(ni->bits, old->slot[i].dev, old->slot[i].ino);
+		for (k = 0; k < span; k++) {
+			struct tosya_index_slot *slot = &ni->slot[(j + k) & mask];
+
+			if (slot->s == NULL || slot->s == TOSYA_INDEX_TOMB) {
+				if (slot->s == NULL)
+					ni->used++;
+				slot->dev = old->slot[i].dev;
+				slot->ino = old->slot[i].ino;
+				WRITE_ONCE(slot->s, old->slot[i].s);
+				break;
+			}
+		}
+	}
+	/* kept, not freed: a reader may still be in the table this one replaces */
+	if (g_index_all_n < TOSYA_INDEX_MAX_BITS + 2u)
+		g_index_all[g_index_all_n++] = ni;
+	rcu_assign_pointer(g_index, ni);
+	return ni;
+}
+
+static void index_put(u32 dev, u64 ino, struct tosya_shadow *s)
+{
+	struct tosya_index *ix = g_index;
+	u32 span, mask, i, n;
+
+	if (ix == NULL || ix->used * 2u >= (1u << ix->bits)) {
+		ix = index_grow_locked();
+		if (ix == NULL) {
+			pr_warn_once("tosya: the apk index is full; later apks cannot be shadowed\n");
+			return;
+		}
+	}
+	span = 1u << ix->bits;
+	mask = span - 1u;
+	i = index_hash(ix->bits, dev, ino);
+	for (n = 0; n < span; n++) {
+		struct tosya_index_slot *slot = &ix->slot[(i + n) & mask];
+
+		if (slot->s == NULL || slot->s == TOSYA_INDEX_TOMB ||
+		    (slot->dev == dev && slot->ino == ino)) {
+			if (slot->s == NULL)
+				ix->used++;
+			slot->dev = dev;
+			slot->ino = ino;
+			WRITE_ONCE(slot->s, s);
+			return;
+		}
+	}
+}
+
+static void index_del(u32 dev, u64 ino)
+{
+	struct tosya_index *ix = g_index;
+	u32 span, mask, i, n;
+
+	if (ix == NULL)
+		return;
+	span = 1u << ix->bits;
+	mask = span - 1u;
+	i = index_hash(ix->bits, dev, ino);
+	for (n = 0; n < span; n++) {
+		struct tosya_index_slot *slot = &ix->slot[(i + n) & mask];
+
+		if (slot->s == NULL)
+			return;
+		if (slot->s != TOSYA_INDEX_TOMB && slot->dev == dev && slot->ino == ino) {
+			WRITE_ONCE(slot->s, TOSYA_INDEX_TOMB);
+			return;
+		}
+	}
+}
 
 static int tosya_shadow_open(struct inode *inode, struct file *file)
 {
@@ -124,131 +309,58 @@ static struct tosya_shadow *shadow_find(u32 dev, u64 ino)
 {
 	u32 i;
 
-	for (i = 0; i < g_shadow_n; i++)
-		if (!g_shadow[i]->parked && g_shadow[i]->dev == dev &&
-		    g_shadow[i]->ino == ino)
-			return g_shadow[i];
-	return NULL;
+	(void)i;
+	return index_get(dev, ino);
 }
 
-// The record that owns a table, when a file already carries one of ours.
-__maybe_unused static struct tosya_shadow *
-shadow_owner(const struct file_operations *fop)
+/*
+ * The table a record answers opens with is made from the file operations of the first inode that
+ * carries the rule. A record is named by its numbers and by nothing else, so a push never looks a
+ * file up: a path walk there is visible to anything watching the paths, and that visibility is what
+ * this design exists to remove.
+ *
+ * Two callers can arrive here at once -- the cache sweep and the inode-creation hook -- and both
+ * would write the same table, so no lock is taken. What matters is that no reader sees a table that
+ * is not finished: inode->i_fop is published only after the table is complete.
+ */
+static void shadow_build(struct tosya_shadow *s, const struct file_operations *cur)
 {
-	u32 i;
+	struct file_operations copy = *cur;
 
-	for (i = 0; i < g_shadow_n; i++)
-		if (&g_shadow[i]->fops == fop)
-			return g_shadow[i];
-	return NULL;
+	copy.open = tosya_shadow_open;
+	copy.owner = THIS_MODULE;
+	WRITE_ONCE(s->orig_open, cur->open);
+	s->fops = copy;
+	smp_wmb();
+	WRITE_ONCE(s->orig_fops, cur);
 }
 
-__maybe_unused static int shadow_replace(const char *path, u32 uid)
+/*
+ * A record, made from the numbers the userspace half already read. No inode is touched and no path
+ * is resolved here; what the file operations are is learned from the first inode the rule meets.
+ */
+static int shadow_arm(u32 dev, u64 ino, u32 uid)
 {
 	const u32 app = uid % 100000u;
-	const struct file_operations *cur;
-	struct tosya_shadow *old, *s;
-	struct inode *inode;
-	struct path p;
-	u32 dev;
-	u64 ino;
+	struct tosya_shadow *s;
 
 	if (app < TOSYA_APP_MIN || app >= TOSYA_APP_MIN + TOSYA_APP_SPAN)
 		return -EINVAL;
-	if (g_kern_path == NULL)
-		g_kern_path = (void *)tosya_lookup("kern_path");
-	if (g_kern_path == NULL)
-		return -ENOENT;
-	if (g_kern_path(path, 0, &p))
-		return -ENOENT;
-	/*
-	 * The inode is held for as long as it is read, and only for that: kern_path()
-	 * pins the dentry, not the inode, and the package manager frees the inode it
-	 * is replacing while the userspace half is still sending the new one -- reading its
-	 * fields after that is a use-after-free, and an unlink is exactly that case
-	 * (d_delete() takes the inode out of the dentry and drops it). Nothing keeps
-	 * the reference past this call: what a record stores is the app to name and
-	 * the table to put back, never a pointer to the inode itself.
-	 */
-	inode = igrab(d_backing_inode(p.dentry));
-	path_put(&p);
-	if (inode == NULL)
-		return -ENOENT;
-	/*
-	 * The inode has to be finished before any of its fields is touched. The file
-	 * systems set i_fop while the inode is still I_NEW (f2fs_iget(),
-	 * erofs_iget()), so a write into that window races the file system's own --
-	 * and an iput of such an inode takes iput_final()'s WARN_ON(I_NEW), which
-	 * panics on a kernel that panics on warnings. igrab() has already refused an
-	 * inode that is being freed (I_FREEING, I_WILL_FREE), and the extra reference
-	 * it took is given back below, so no iput here is the last one.
-	 */
-	if (inode->i_state & I_NEW) {
-		iput(inode);
-		return -EAGAIN;
-	}
-	cur = READ_ONCE(inode->i_fop);
-	if (cur == NULL) {
-		iput(inode);
-		return -EINVAL;
-	}
-	dev = tosya_encode_dev(inode->i_sb->s_dev);
-	ino = inode->i_ino;
-	if (shadow_find(dev, ino) != NULL) {
-		iput(inode);
-		return 0; // already replaced
-	}
+	if (shadow_find(dev, ino) != NULL)
+		return 0;	/* this file is already named */
 	if (g_shadow_n >= TOSYA_APK_MAX) {
-		static bool warned;
-
-		iput(inode);
-		if (!warned) {
-			warned = true;
-			pr_warn("tosya: %u app apk(s) have been replaced and the rest cannot be named\n",
-				g_shadow_n);
-		}
+		pr_warn_once("tosya: %u app apk(s) are named and the rest cannot be\n",
+			     g_shadow_n);
 		return -ENOSPC;
 	}
 	s = kzalloc(sizeof(*s), GFP_KERNEL);
-	if (s != NULL) {
-		s->path = kstrdup(path, GFP_KERNEL);
-		if (s->path == NULL) {
-			kfree(s);
-			s = NULL;
-		}
-	}
-	if (s == NULL) {
-		iput(inode);
+	if (s == NULL)
 		return -ENOMEM;
-	}
-	/*
-	 * A file that already carries a table of ours: the userspace half drops an apk when its
-	 * path goes away, and the same inode comes back when a reinstall brings it
-	 * home. What the record has to keep is the *original* table of that file --
-	 * storing what the inode carries now would make this module's own open the one
-	 * to chain to, and the first open after that would call itself forever.
-	 */
-	old = shadow_owner(cur);
-	s->orig_fops = old ? old->orig_fops : cur;
-	s->orig_open = old ? old->orig_open : cur->open;
-	s->fops = *s->orig_fops;
-	s->fops.open = tosya_shadow_open;
-	/*
-	 * The copy is this module's memory and it is what every later open of this
-	 * file goes through (VFS: f->f_op = fops_get(inode->i_fop)), so naming this
-	 * module as its owner is what makes that a reference: the module cannot be
-	 * unloaded while a file opened this way is still open, which is also what
-	 * makes giving the records back at unload safe. The filesystem's own owner is
-	 * not copied -- it is alive anyway, the inode is its own.
-	 */
-	s->fops.owner = THIS_MODULE;
 	s->app = app - TOSYA_APP_MIN;
 	s->dev = dev;
 	s->ino = ino;
-	s->parked = false;
-	WRITE_ONCE(inode->i_fop, &s->fops);
 	g_shadow[g_shadow_n++] = s;
-	iput(inode);
+	index_put(s->dev, s->ino, s);
 	return 0;
 }
 
@@ -272,18 +384,101 @@ __maybe_unused static void shadow_drop_id(u32 dev, u64 ino)
 	 * inode number -- is given a table of its own.
 	 */
 	s->parked = true;
+	index_del(s->dev, s->ino);
 }
 
 /*
- * Streaming: one record lands one file, and carries its generation. ADD goes through
- * shadow_replace, DEL through shadow_drop_id (parking); the two share code, not meaning.
+ * Streaming: one record names one file and carries its generation. ADD goes through
+ * shadow_arm, DEL through shadow_drop_id (parking); the two share code, not meaning.
  */
+/*
+ * Is this inode one of ours? Called with a newly read inode before it is unlocked, so the file
+ * system has finished setting i_fop and nothing can open it yet: replacing it here is the one
+ * moment with no window and no race.
+ */
+bool tosya_apk_shadow_apply(struct inode *inode)
+{
+	const struct file_operations *cur;
+	struct tosya_shadow *s;
+
+	if (!TOSYA_APK_SHADOW)
+		return false;
+	if (inode == NULL || g_shadow_n == 0)
+		return false;
+	if (!S_ISREG(inode->i_mode))
+		return false;
+	s = index_get(tosya_encode_dev(inode->i_sb->s_dev), inode->i_ino);
+	if (s == NULL)
+		return false;
+	cur = READ_ONCE(inode->i_fop);
+	if (cur == NULL || cur == &s->fops)
+		return false;
+	if (s->orig_fops == NULL)
+		shadow_build(s, cur);
+	else if (cur != READ_ONCE(s->orig_fops))
+		return false;	/* another table: never replaced */
+	WRITE_ONCE(inode->i_fop, &s->fops);
+	return true;
+}
+
+/*
+ * The rules arrived and the files behind them may already be in the cache. They are asked of the
+ * cache, and only of the cache: a file the cache does not hold has no inode to arm, and looking it
+ * up by name would instantiate one -- visible to anything watching the paths, which is the thing
+ * this design exists to avoid. Such a file is covered by the other half: when something next opens
+ * it, the inode is created and unlock_new_inode carries the rule to it.
+ *
+ * Two things make the cache safe to ask, and both are the callee's doing:
+ *   - user_get_super(dev, false) takes the super block's read lock, and drop_super() gives it back;
+ *   - ilookup() takes the inode hash lock itself, calls __iget() on what it finds -- so the answer
+ *     comes with a reference this call owns -- waits out I_NEW, and retries if the inode was
+ *     unhashed in the meantime.
+ *
+ * What must not be done is grabbing it again, or reading i_count first: an extra reference leaks,
+ * and a count read from an inode nobody holds is a read of something that may already be free.
+ */
+typedef struct super_block *(*tosya_user_get_super_t)(dev_t, bool);
+static tosya_user_get_super_t g_user_get_super;
+
+void tosya_apk_shadow_sweep(void)
+{
+	u32 i;
+
+	if (g_user_get_super == NULL)
+		g_user_get_super = (void *)tosya_lookup("user_get_super");
+	if (g_user_get_super == NULL)
+		return;
+	mutex_lock(&g_shadow_lock);
+	for (i = 0; i < g_shadow_n; i++) {
+		struct tosya_shadow *s = g_shadow[i];
+		struct super_block *sb;
+		struct inode *inode;
+
+		if (s->parked)
+			continue;
+		sb = g_user_get_super(new_decode_dev(s->dev), false);
+		if (sb == NULL)
+			continue;
+		inode = ilookup(sb, s->ino);
+		if (inode != NULL) {
+			/* the reference ilookup answered with is ours to give back */
+			tosya_apk_shadow_apply(inode);
+			iput(inode);
+		}
+		drop_super(sb);
+	}
+	mutex_unlock(&g_shadow_lock);
+}
+
 int tosya_apk_stream(u32 op, u32 uid, u32 dev, u64 ino, const char *path,
 		     u32 bytes)
 {
 	int rc;
 
 	(void)bytes;
+	(void)path;
+	if (!TOSYA_APK_SHADOW)
+		return 0;
 
 	if (op == KAUX_OP_DEL) {
 		mutex_lock(&g_shadow_lock);
@@ -293,19 +488,23 @@ int tosya_apk_stream(u32 op, u32 uid, u32 dev, u64 ino, const char *path,
 	}
 
 	mutex_lock(&g_shadow_lock);
-	rc = shadow_replace(path, uid);
+	rc = shadow_arm(dev, ino, uid);
 	mutex_unlock(&g_shadow_lock);
 	return rc;
 }
 
+
 /*
- * End of a stream: entries outside this generation leave. Parking is leaving -- lookups
- * skip them, and the allocation is reused by the next replacement, so the table stays
- * bounded by TOSYA_APK_MAX.
+ * End of a stream: entries outside this generation leave. Parking is leaving -- lookups skip them,
+ * and the record itself stays allocated, because an inode may still be pointing at its table: the
+ * memory is bounded by TOSYA_APK_MAX and given back at unload.
  */
 u32 tosya_apk_stream_finish(void)
 {
 	u32 i, left = 0;
+
+	if (TOSYA_APK_SHADOW)
+		tosya_apk_shadow_sweep();
 
 	mutex_lock(&g_shadow_lock);
 	for (i = 0; i < g_shadow_n; i++)
@@ -315,166 +514,58 @@ u32 tosya_apk_stream_finish(void)
 	return left;
 }
 
-int tosya_apk_apply(const u32 *blob, u32 len)
-{
-	const u32 n = blob[0];
-	const u8 *bytes = (const u8 *)blob;
-	u32 i, replaced = 0, dropped = 0, failed = 0;
-
-	if (n > TOSYA_APK_MAX || len < 4u + 16ull * n)
-		return -EINVAL;
-	/*
-	 * Read-only pass, on purpose: it resolves the same paths the replacement
-	 * would and prints what the package manager's inode looks like from here,
-	 * but it writes nothing and takes no reference. That answers, in one boot,
-	 * whether the inode is still I_NEW when this runs, whether its open is still
-	 * the file system's, and which directory the path landed in.
-	 */
-	pr_info("tosya: %u entr(ies) offered\n", n);
-	for (i = 0; i < n && i < 8u; i++) {
-		const u32 *e = &blob[1 + 4u * i];
-		struct inode *inode;
-		struct path p;
-		const char *path;
-
-		if (e[0] != 0u || e[3] == 0u || e[2] < 4u ||
-		    (unsigned long long)e[2] + e[3] > len ||
-		    bytes[e[2] + e[3] - 1u] != '\0')
-			continue;
-		path = (const char *)(bytes + e[2]);
-		if (g_kern_path == NULL)
-			g_kern_path = (void *)tosya_lookup("kern_path");
-		if (g_kern_path == NULL || g_kern_path(path, 0, &p))
-			continue;
-		/* the same reference the replacement takes: reading an inode the
-		 * package manager has already let go of is a use-after-free even in a
-		 * diagnostic */
-		inode = igrab(d_backing_inode(p.dentry));
-		path_put(&p);
-		if (inode != NULL && TOSYA_DEBUG_ON())
-			pr_info("tosya: apk probe %s: state=%#lx new=%d count=%d dev=%u ino=%lu size=%lld\n",
-				path, (unsigned long)inode->i_state,
-				!!(inode->i_state & I_NEW),
-				atomic_read(&inode->i_count),
-				(unsigned int)tosya_encode_dev(
-					inode->i_sb->s_dev),
-				(unsigned long)inode->i_ino,
-				(long long)i_size_read(inode));
-		if (inode != NULL)
-			iput(inode);
-	}
-	mutex_lock(&g_shadow_lock);
-	for (i = 0; i < n; i++) {
-		const u32 *e = &blob[1 + 4u * i];
-		const u32 action = e[0];
-
-		if (TOSYA_DEBUG_ON())
-			pr_info("tosya: apk entry %u: action %u a=%u b=%u c=%u\n",
-				i, action, e[1], e[2], e[3]);
-		if (action == 0u) {
-			const u32 uid = e[1], off = e[2], size = e[3];
-			const char *path;
-
-			if (size == 0 || off < 4u || off + size > len ||
-			    bytes[off + size - 1u] != '\0')
-				continue;
-			path = (const char *)(bytes + off);
-			if (shadow_replace(path, uid) == 0)
-				replaced++;
-			else
-				failed++;
-		} else if (action == 1u) {
-			/*
-			 * The module's own table is all this touches: the file is gone -- that is why the
-			 * helper sent this -- and the inode that still points at the module's table
-			 * belongs to the package manager, which is the one that reclaims it.
-			 * Reaching into that inode from here is what took the kernel down on
-			 * an install.
-			 */
-			shadow_drop_id(e[1], ((u64)e[3] << 32) | e[2]);
-			dropped++;
-		} else {
-			failed++;
-		}
-	}
-	mutex_unlock(&g_shadow_lock);
-	pr_info("tosya: %u apk inode(s) replaced, %u put back, %u of %u entr(ies) failed\n",
-		replaced, dropped, failed, n);
-	/*
-	 * What the status carries is how many inodes are held right now, so an apply
-	 * that only carries one new app does not make it look as if that one were the
-	 * whole set. offered is what this set carried; a failure counts against it.
-	 */
-	{
-		u32 live = 0;
-
-		/* counted from the table, not from this call's deltas: a drop for an entry the kernel
-		 * never had would take the count below zero. */
-		for (i = 0; i < g_shadow_n; i++)
-			if (!g_shadow[i]->parked)
-				live++;
-		tosya_status_set_apks(live, n, failed);
-	}
-	return 0;
-}
-
 /*
- * Put every table back, at unload. No inode is held anywhere, so the one behind
- * a record is found again from the path stored when it was replaced: the file
- * may be gone by now, or the path may point at a replacement, and then there is
- * nothing to put back -- a new inode has its own open, and it is either already
- * replaced or was never asked for.
+ * Put every table back, at unload. A record is found by its numbers and only in the inode cache: an
+ * inode that is not cached cannot be holding a pointer to that table -- it would have to have been
+ * instantiated and armed for that -- so nothing is missed by not looking for it by name.
+ *
+ * The records themselves are released here. What can still reference one is a file opened through
+ * its table, which holds a reference on THIS_MODULE (the owner set in the copy), and module_exit
+ * runs only with that count at zero.
  */
 void tosya_apk_remove(void)
 {
 	u32 i, unresolved = 0;
 
+	if (g_user_get_super == NULL)
+		g_user_get_super = (void *)tosya_lookup("user_get_super");
 	mutex_lock(&g_shadow_lock);
 	for (i = 0; i < g_shadow_n; i++) {
 		struct tosya_shadow *s = g_shadow[i];
+		struct super_block *sb;
 		struct inode *inode;
-		struct path p;
 
-		if (s->path == NULL)
-			continue;
-		if (g_kern_path == NULL)
-			g_kern_path = (void *)tosya_lookup("kern_path");
-		if (g_kern_path == NULL || g_kern_path(s->path, 0, &p) != 0) {
+		if (s->orig_fops == NULL || g_user_get_super == NULL) {
 			unresolved++;
 			continue;
 		}
-		inode = igrab(d_backing_inode(p.dentry));
-		path_put(&p);
-		if (inode == NULL)
+		sb = g_user_get_super(new_decode_dev(s->dev), false);
+		if (sb == NULL) {
+			unresolved++;
 			continue;
-		if (READ_ONCE(inode->i_fop) == &s->fops)
-			WRITE_ONCE(inode->i_fop, s->orig_fops);
-		iput(inode);
+		}
+		inode = ilookup(sb, s->ino);
+		if (inode != NULL) {
+			if (READ_ONCE(inode->i_fop) == &s->fops)
+				WRITE_ONCE(inode->i_fop, s->orig_fops);
+			iput(inode);
+		}
+		drop_super(sb);
 	}
-	/*
-	 * The records are this module's memory and the module is going away, so they
-	 * are given back here -- parked ones included. Nothing else frees them: they
-	 * outlive the files they were made for on purpose, so that no record is ever
-	 * handed back while an inode may still point at its table.
-	 *
-	 * What can still reference one at this point: a file opened through it holds a
-	 * reference on THIS_MODULE (the owner set in the copy), and module_exit runs
-	 * only with that count at zero, so no such file is left open; an inode holds
-	 * nothing by itself, and the ones still reachable by name were put back just
-	 * above. A record counted as unresolved is a file the package manager moved or
-	 * removed: its path is gone, so the only handle left on that inode is one a
-	 * process already has -- and that is a file opened through the table, which is
-	 * counted above.
-	 */
 	if (unresolved != 0)
-		pr_info("tosya: %u apk file(s) could not be found again at unload\n",
+		pr_info("tosya: %u apk record(s) had no inode to put back at unload\n",
 			unresolved);
 	for (i = 0; i < g_shadow_n; i++) {
-		kfree(g_shadow[i]->path);
 		kfree(g_shadow[i]);
 		g_shadow[i] = NULL;
 	}
 	g_shadow_n = 0;
+	for (i = 0; i < g_index_all_n; i++) {
+		kvfree(g_index_all[i]->slot);
+		kfree(g_index_all[i]);
+	}
+	g_index_all_n = 0;
+	rcu_assign_pointer(g_index, NULL);
 	mutex_unlock(&g_shadow_lock);
 }
 /* TOSYA_SHADOW_END */

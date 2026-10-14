@@ -240,6 +240,12 @@ static int kaux_batch(struct sk_buff *skb, struct genl_info *info)
 
 	if (g_kind == KAUX_KIND_POLICY)
 		return kaux_batch_policy(b, p, words);
+	if (g_kind == KAUX_KIND_NAMES) {
+		mutex_lock(&g_apply_lock);
+		tosya_names_apply(p + 1, words - 1);
+		mutex_unlock(&g_apply_lock);
+		return 0;
+	}
 
 	mutex_lock(&g_apply_lock);
 	rc = kaux_batch_apks(b, p, words);
@@ -324,6 +330,10 @@ static int kaux_status(struct sk_buff *skb, struct genl_info *info)
 	out = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
 	if (!out)
 		return -ENOMEM;
+	st.scrub_in_place = tosya_scrub_in_place;
+	st.scrub_runs = tosya_scrub_runs;
+	st.scrub_hits = tosya_scrub_hits;
+	st.scrub_names = tosya_scrub_names;
 	hdr = genlmsg_put_reply(out, info, &kaux_family, 0, KAUX_CMD_STATUS);
 	if (hdr == NULL || nla_put(out, KAUX_ATTR_STATUS, sizeof(st), &st)) {
 		nlmsg_free(out);
