@@ -1,31 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * netlink.c - the channel from privileged userspace into the kernel: the policy,
- * the caller apk table and a status reply. The wire format is include/kaux.h,
- * which the userspace half includes as well, so the two ends cannot drift apart.
- *
- * The channel streams, and a record is applied as it arrives. The set has no natural
- * ceiling -- every apk, every extracted native library, and every drop a package
- * change makes -- and staging a whole set in kernel memory is what would put one
- * there. These four records are what the set is:
- *
- *   BEGIN{kind, gen}   what a stream is about
- *   BATCH{gen, count}  count records, each self-delimited, applied in order
- *   END{gen}           gen becomes current; whatever an older gen added and no
- *                      newer record restored is dropped
- *
- * A client that dies mid-upload therefore leaves the previous set intact, and a
- * client that finished leaves exactly its own. Drops travel as records of their
- * own, because the module keeps the ledger and says what to remove: nobody has to
- * diff a set against a set, on either side of the channel.
- *
- * The one thing that is still held whole is the policy, because that is what it
- * is: pairs of (caller, target) with no keys to add or remove one by one. It is
- * bounded (POLICY_MAX_PAIRS) and small, and it is applied at END in one step.
+ * netlink.c - privileged BEGIN/BATCH/END streams (include/kaux.h).
+ * One netlink port owns the stream until END or a five-second idle timeout.
+ * Policy pairs are collected and replaced at END. APK records apply incrementally;
+ * END reports per-record failures and counts active records. Token/socket/name batches
+ * have their own layouts and must never overwrite the APK status counters.
  */
 
 #include "tosya.h"
 #include <linux/kernel.h>
+#include <linux/jiffies.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -49,13 +33,13 @@ static DEFINE_MUTEX(g_stream_lock);
 static DEFINE_MUTEX(g_apply_lock);
 static u32 g_token[4]; /* the name both halves use, as it arrived */
 static bool g_open; // a BEGIN without its END yet
+static u32 g_owner;
+static unsigned long g_deadline;
 static u32 g_kind;
 static u32 *g_policy; // the pairs collected for the stream in progress
 static u32 g_policy_words;
 static u32 g_policy_cap;
 static u32 g_offered; // records this stream carried, for the status reply
-// the last stream that ended: what STATUS reports once the one in flight is gone
-static u32 g_last_offered;
 static u32 g_failed; // of those, how many did not land
 
 // Defined with its ops below; the status reply names it.
@@ -102,15 +86,22 @@ static int kaux_begin(struct sk_buff *skb, struct genl_info *info)
 	if (b->kind > KAUX_KIND_MAX)
 		return -EINVAL;
 
+	mutex_lock(&g_apply_lock);
 	mutex_lock(&g_stream_lock);
-	if (g_open)
-		pr_warn("tosya: a stream was still open and is replaced\n");
+	if (g_open && time_before(jiffies, g_deadline)) {
+		mutex_unlock(&g_stream_lock);
+		mutex_unlock(&g_apply_lock);
+		return -EBUSY;
+	}
+	g_owner = info->snd_portid;
+	g_deadline = jiffies + 5 * HZ;
 	g_open = true;
 	g_kind = b->kind;
 	g_offered = 0;
 	g_failed = 0;
 	g_policy_words = 0;
 	mutex_unlock(&g_stream_lock);
+	mutex_unlock(&g_apply_lock);
 	return 0;
 }
 
@@ -131,7 +122,7 @@ static int kaux_batch_apks(const struct kaux_batch *b, const u32 *p, u32 words)
 		r = (const struct kaux_apk_rec *)(p + at);
 		/*
 		 * A drop carries no path: the file is gone, and the module's ledger only has
-		 * (dev, ino) left for it. An add must carry one -- the kernel resolves it.
+		 * (dev, ino) left for it. ADD carries a diagnostic path; identity is authoritative.
 		 */
 		if (r->op > KAUX_OP_MAX ||
 		    (r->op == KAUX_OP_ADD && r->path_bytes == 0))
@@ -219,120 +210,93 @@ static int kaux_batch(struct sk_buff *skb, struct genl_info *info)
 	const struct kaux_batch *b;
 	const u32 *p;
 	u32 len, words;
-	int rc;
+	int rc = kaux_blob(info, &p, &len);
 
-	rc = kaux_blob(info, &p, &len);
 	if (rc)
 		return rc;
-	if (len < 4)
-		return -EINVAL;
 	b = (const struct kaux_batch *)p;
 	words = len / 4u;
-	if (b->count == 0)
-		return -EINVAL;
-
+	mutex_lock(&g_apply_lock);
 	mutex_lock(&g_stream_lock);
-	if (!g_open) {
+	if (!g_open || g_owner != info->snd_portid) {
 		mutex_unlock(&g_stream_lock);
-		return -EINVAL;
+		mutex_unlock(&g_apply_lock);
+		return -EPERM;
 	}
+	g_deadline = jiffies + 5 * HZ;
 	g_offered += b->count;
 	mutex_unlock(&g_stream_lock);
 
-	if (g_kind == KAUX_KIND_POLICY)
-		return kaux_batch_policy(b, p, words);
-	if (g_kind == KAUX_KIND_TOKEN) {
-		u32 i, n = min(words, 4u);
-
-		for (i = 0; i < n; i++)
-			g_token[i] = p[i];
-		return 0;
-	}
-	if (g_kind == KAUX_KIND_ZYGOTE) {
-		/*
-		 * The sockets whose holder forks for apps. One message, one answer: the userspace half reads
-		 * them from the environment the zygote was started with, which is the only place their
-		 * numbers can be known from.
-		 */
-		static u32 words_out[8u * 3u];
-		u32 count = words > 0 ? p[0] : 0;
-		u32 i, k = 0;
-
-		if (count > 8u)
-			count = 8u;
-		for (i = 0; i < count && 1u + (i + 1u) * 3u <= words; i++) {
-			words_out[k++] = p[1u + i * 3u];
-			words_out[k++] = p[2u + i * 3u];
-			words_out[k++] = p[3u + i * 3u];
+	switch (g_kind) {
+	case KAUX_KIND_POLICY:
+		rc = kaux_batch_policy(b, p, words);
+		break;
+	case KAUX_KIND_TOKEN:
+		/* The first word is the batch count, NOT a word of the secret. */
+		if (b->count != 4u || words != 5u) { rc = -EINVAL; break; }
+		memcpy(g_token, p + 1, sizeof(g_token));
+		break;
+	case KAUX_KIND_ZYGOTE:
+		/* batch count, socket count, then (encoded dev, ino low, ino high). */
+		if (words < 2u || b->count > 8u || p[1] != b->count || words != 2u + 3u * b->count) {
+			rc = -EINVAL;
+			break;
 		}
-		mutex_lock(&g_apply_lock);
-		tosya_zygote_sockets_set(words_out, k / 3u);
-		mutex_unlock(&g_apply_lock);
-		return 0;
+		tosya_zygote_sockets_set(p + 2, b->count);
+		break;
+	case KAUX_KIND_NAMES:
+		rc = tosya_names_apply(p + 1, words - 1);
+		break;
+	case KAUX_KIND_APKS:
+		rc = kaux_batch_apks(b, p, words);
+		break;
+	default:
+		rc = -EINVAL;
 	}
-	if (g_kind == KAUX_KIND_NAMES) {
-		mutex_lock(&g_apply_lock);
-		tosya_names_apply(p + 1, words - 1);
-		mutex_unlock(&g_apply_lock);
-		return 0;
+	if (rc) {
+		mutex_lock(&g_stream_lock);
+		g_open = false;
+		mutex_unlock(&g_stream_lock);
 	}
-
-	mutex_lock(&g_apply_lock);
-	rc = kaux_batch_apks(b, p, words);
 	mutex_unlock(&g_apply_lock);
 	return rc;
 }
 
-/* blob: none -- the stream is over. Nothing is swept: the set is what was added and not
- * removed, so a stream that stops halfway stops. */
+/* One owner through END. BEGIN cannot overwrite the policy buffer during apply. */
 static int kaux_end(struct sk_buff *skb, struct genl_info *info)
 {
-	u32 kind, words, offered;
+	u32 kind, words, offered, failed;
+	int rc = kaux_version(info);
 
+	if (rc)
+		return rc;
+	mutex_lock(&g_apply_lock);
 	mutex_lock(&g_stream_lock);
-	if (!g_open) {
+	if (!g_open || g_owner != info->snd_portid) {
 		mutex_unlock(&g_stream_lock);
-		return -EINVAL;
+		mutex_unlock(&g_apply_lock);
+		return -EPERM;
 	}
 	kind = g_kind;
 	words = g_policy_words;
 	offered = g_offered;
-	g_last_offered = offered;
+	failed = g_failed;
 	g_open = false;
 	g_kind = 0;
 	g_offered = 0;
-	// The pairs stay in the buffer: the apply below reads them.
 	mutex_unlock(&g_stream_lock);
 
-	mutex_lock(&g_apply_lock);
-	/*
-	 * The two kinds that are complete in one batch: their end carries nothing, and must not be
-	 * mistaken for an apk stream -- counting the table there would report a table nobody sent.
-	 */
-	if (kind == KAUX_KIND_TOKEN || kind == KAUX_KIND_ZYGOTE) {
-		mutex_unlock(&g_apply_lock);
-		return 0;
-	}
-
 	if (kind == KAUX_KIND_POLICY) {
-		pr_info("tosya: policy stream: %u pair(s)\n", words / 2u);
 		policy_apply(g_policy, words / 2u);
-		mutex_lock(&g_stream_lock);
-		g_policy_words = 0;
-		mutex_unlock(&g_stream_lock);
-	} else {
+	} else if (kind == KAUX_KIND_APKS) {
 		u32 left = tosya_apk_stream_finish();
-
-		pr_info("tosya: apk stream: %u record(s), %u in the table, %u refused\n",
-			offered, left);
-		/*
-		 * This is what the manager's card reads. Counted from the table itself, not from this
-		 * call's deltas, so a missed drop cannot move it.
-		 */
-		tosya_status_set_apks(left, offered, g_failed);
+		pr_info("tosya: apk stream: %u record(s), %u in the table, %u refused\n", offered, left, failed);
+		tosya_status_set_apks(left, offered, failed);
+		if (failed)
+			rc = -EIO;
 	}
 	mutex_unlock(&g_apply_lock);
-	return 0;
+	return rc;
 }
 
 static int kaux_ping(struct sk_buff *skb, struct genl_info *info)
@@ -362,9 +326,7 @@ static int kaux_status(struct sk_buff *skb, struct genl_info *info)
 
 	tosya_status_get(&st);
 
-	mutex_lock(&g_stream_lock);
-	st.apk_offered = g_offered ? g_offered : g_last_offered;
-	mutex_unlock(&g_stream_lock);
+	/* APK counters are owned by tosya_status_set_apks, never by token/name streams. */
 
 	out = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
 	if (!out)
@@ -373,10 +335,9 @@ static int kaux_status(struct sk_buff *skb, struct genl_info *info)
 	st.scrub_runs = tosya_scrub_runs;
 	st.scrub_hits = tosya_scrub_hits;
 	st.scrub_names = tosya_scrub_names;
-	st.token[0] = g_token[0];
-	st.token[1] = g_token[1];
-	st.token[2] = g_token[2];
-	st.token[3] = g_token[3];
+	mutex_lock(&g_apply_lock);
+	memcpy(st.token, g_token, sizeof(g_token));
+	mutex_unlock(&g_apply_lock);
 	hdr = genlmsg_put_reply(out, info, &kaux_family, 0, KAUX_CMD_STATUS);
 	if (hdr == NULL || nla_put(out, KAUX_ATTR_STATUS, sizeof(st), &st)) {
 		nlmsg_free(out);

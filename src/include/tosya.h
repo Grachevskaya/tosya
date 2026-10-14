@@ -279,7 +279,7 @@ void tosya_status_set_apks(unsigned int inodes, unsigned int expected,
 void tosya_status_note(int error);
 
 /* The hidden names travel in the clear, for the cleanup that runs inside the zygote. */
-void tosya_names_apply(const u32 *words, u32 nwords);
+int tosya_names_apply(const u32 *words, u32 nwords);
 extern u32 g_names_gen;
 extern unsigned int tosya_scrub_in_place, tosya_scrub_runs, tosya_scrub_hits,
 	tosya_scrub_names;

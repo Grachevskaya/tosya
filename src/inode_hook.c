@@ -344,7 +344,7 @@ static int shadow_arm(u32 dev, u64 ino, u32 uid)
 	const u32 app = uid % 100000u;
 	struct tosya_shadow *s;
 
-	if (app < TOSYA_APP_MIN || app >= TOSYA_APP_MIN + TOSYA_APP_SPAN)
+	if (!ino || app < TOSYA_APP_MIN || app >= TOSYA_APP_MIN + TOSYA_APP_SPAN)
 		return -EINVAL;
 	if (shadow_find(dev, ino) != NULL)
 		return 0;	/* this file is already named */
@@ -501,16 +501,20 @@ int tosya_apk_stream(u32 op, u32 uid, u32 dev, u64 ino, const char *path,
  */
 u32 tosya_apk_stream_finish(void)
 {
-	u32 i, left = 0;
+	u32 i, left = 0, attached = 0;
 
 	if (TOSYA_APK_SHADOW)
 		tosya_apk_shadow_sweep();
 
 	mutex_lock(&g_shadow_lock);
 	for (i = 0; i < g_shadow_n; i++)
-		if (!g_shadow[i]->parked)
+		if (!g_shadow[i]->parked) {
 			left++;
+			if (g_shadow[i]->orig_fops != NULL)
+				attached++;
+		}
 	mutex_unlock(&g_shadow_lock);
+	pr_info("tosya: apk records: %u active, %u have encountered an inode\n", left, attached);
 	return left;
 }
 

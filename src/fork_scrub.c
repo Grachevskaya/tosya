@@ -219,16 +219,21 @@ struct tosya_scan {
 static u32 g_socket_dev[TOSYA_ZYGOTE_SOCKETS_MAX];
 static u64 g_socket_ino[TOSYA_ZYGOTE_SOCKETS_MAX];
 static u32 g_socket_n;
+static u32 g_socket_generation;
+static DEFINE_SPINLOCK(g_socket_lock);
 
 void tosya_zygote_sockets_set(const u32 *pairs, u32 npairs)
 {
 	u32 i, n = min(npairs, TOSYA_ZYGOTE_SOCKETS_MAX);
 
+	spin_lock(&g_socket_lock);
 	for (i = 0; i < n; i++) {
 		g_socket_dev[i] = pairs[i * 3u];
 		g_socket_ino[i] = (u64)pairs[i * 3u + 1u] | ((u64)pairs[i * 3u + 2u] << 32);
 	}
 	WRITE_ONCE(g_socket_n, n);
+	WRITE_ONCE(g_socket_generation, g_socket_generation + 1u);
+	spin_unlock(&g_socket_lock);
 	pr_info("tosya: %u socket(s) say which task starts apps\n", n);
 }
 
@@ -237,9 +242,14 @@ static bool tosya_holds_a_zygote_socket(void)
 	struct files_struct *files = current->files;
 	struct fdtable *fdt;
 	unsigned int max, i;
-	u32 n, k;
+	u32 n, k, devs[TOSYA_ZYGOTE_SOCKETS_MAX];
+	u64 inos[TOSYA_ZYGOTE_SOCKETS_MAX];
 
-	n = READ_ONCE(g_socket_n);
+	spin_lock(&g_socket_lock);
+	n = g_socket_n;
+	memcpy(devs, g_socket_dev, sizeof(devs));
+	memcpy(inos, g_socket_ino, sizeof(inos));
+	spin_unlock(&g_socket_lock);
 	if (n == 0 || files == NULL)
 		return false;
 	rcu_read_lock();
@@ -259,8 +269,7 @@ static bool tosya_holds_a_zygote_socket(void)
 		dev = tosya_encode_dev(inode->i_sb->s_dev);
 		ino = inode->i_ino;
 		for (k = 0; k < n; k++)
-			if ((g_socket_dev[k] == 0u || g_socket_dev[k] == dev) &&
-			    g_socket_ino[k] == ino) {
+			if (devs[k] == dev && inos[k] == ino) {
 				rcu_read_unlock();
 				return true;
 			}
@@ -278,6 +287,7 @@ static bool tosya_holds_a_zygote_socket(void)
 struct tosya_forker {
 	struct task_struct *task;
 	u64 start;
+	u32 generation;
 	bool forker;
 };
 static struct tosya_forker g_forkers[TOSYA_FORKERS];
@@ -289,11 +299,13 @@ static bool tosya_parent_starts_apps(void)
 	struct task_struct *self = current;
 	u64 start = self->start_boottime;
 	u32 i, slot = TOSYA_FORKERS;
+	u32 generation = READ_ONCE(g_socket_generation);
 	bool answer;
 
 	spin_lock(&g_forkers_lock);
 	for (i = 0; i < TOSYA_FORKERS; i++) {
-		if (g_forkers[i].task == self && g_forkers[i].start == start) {
+		if (g_forkers[i].task == self && g_forkers[i].start == start &&
+		    g_forkers[i].generation == generation) {
 			answer = g_forkers[i].forker;
 			spin_unlock(&g_forkers_lock);
 			return answer;
@@ -306,10 +318,14 @@ static bool tosya_parent_starts_apps(void)
 	spin_unlock(&g_forkers_lock);
 
 	answer = tosya_holds_a_zygote_socket();
+	/* A fork before socket publication/acquisition must not cache a permanent false. */
+	if (!answer)
+		return false;
 
 	spin_lock(&g_forkers_lock);
 	g_forkers[slot].task = self;
 	g_forkers[slot].start = start;
+	g_forkers[slot].generation = generation;
 	g_forkers[slot].forker = answer;
 	spin_unlock(&g_forkers_lock);
 	return answer;
