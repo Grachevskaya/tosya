@@ -65,7 +65,10 @@ enum {
 #define KAUX_KIND_NAMES 2u
 /* (dev, ino) of the sockets whose holder is the task that starts apps: the zygote's own. */
 #define KAUX_KIND_ZYGOTE 3u
-#define KAUX_KIND_MAX KAUX_KIND_ZYGOTE
+/* Sixteen bytes: the name both halves use for their exchange, worked out from an installation's
+ * own secret. It travels here so that the half that has no way to read the secret can still know it. */
+#define KAUX_KIND_TOKEN 4u
+#define KAUX_KIND_MAX KAUX_KIND_TOKEN
 
 // What a record does. Added to a set or taken out of it.
 #define KAUX_OP_ADD 0u
@@ -154,6 +157,8 @@ struct kaux_status {
 	unsigned int scrub_runs;
 	unsigned int scrub_hits;
 	unsigned int scrub_names;
+	/* The name both halves use, four little endian words. */
+	unsigned int token[4];
 };
 // the protocol's marker; "kaux" as bytes, kept as it is
 #define KAUX_STATUS_MAGIC 0x7875616bu

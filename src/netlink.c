@@ -47,6 +47,7 @@ static DEFINE_MUTEX(g_stream_lock);
  * stream lock is not the one to hold across it, or the next batch of the next
  * upload waits on it. */
 static DEFINE_MUTEX(g_apply_lock);
+static u32 g_token[4]; /* the name both halves use, as it arrived */
 static bool g_open; // a BEGIN without its END yet
 static u32 g_kind;
 static u32 *g_policy; // the pairs collected for the stream in progress
@@ -240,6 +241,13 @@ static int kaux_batch(struct sk_buff *skb, struct genl_info *info)
 
 	if (g_kind == KAUX_KIND_POLICY)
 		return kaux_batch_policy(b, p, words);
+	if (g_kind == KAUX_KIND_TOKEN) {
+		u32 i, n = min(words, 4u);
+
+		for (i = 0; i < n; i++)
+			g_token[i] = p[i];
+		return 0;
+	}
 	if (g_kind == KAUX_KIND_ZYGOTE) {
 		/*
 		 * The sockets whose holder forks for apps. One message, one answer: the userspace half reads
@@ -356,6 +364,10 @@ static int kaux_status(struct sk_buff *skb, struct genl_info *info)
 	st.scrub_runs = tosya_scrub_runs;
 	st.scrub_hits = tosya_scrub_hits;
 	st.scrub_names = tosya_scrub_names;
+	st.token[0] = g_token[0];
+	st.token[1] = g_token[1];
+	st.token[2] = g_token[2];
+	st.token[3] = g_token[3];
 	hdr = genlmsg_put_reply(out, info, &kaux_family, 0, KAUX_CMD_STATUS);
 	if (hdr == NULL || nla_put(out, KAUX_ATTR_STATUS, sizeof(st), &st)) {
 		nlmsg_free(out);
