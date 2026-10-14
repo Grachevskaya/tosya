@@ -384,8 +384,7 @@ static void scenario_remove(void)
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
-		fprintf(stderr,
-			"usage: %s <early-put|no-reuse|readd|remove>\n",
+		fprintf(stderr, "usage: %s <early-put|no-reuse|readd|remove>\n",
 			argv[0]);
 		return 2;
 	}

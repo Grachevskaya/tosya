@@ -11,8 +11,8 @@
 /* The bytes a token in memory is made of: everything a package name may hold, and nothing else. */
 static inline bool tosya_name_char(u8 c)
 {
-	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-	       c == '_' || c == '.';
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+	       (c >= '0' && c <= '9') || c == '_' || c == '.';
 }
 
 /*

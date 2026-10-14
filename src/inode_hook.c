@@ -123,7 +123,8 @@ static u32 g_index_all_n;
 
 static u32 index_hash(u32 bits, u32 dev, u64 ino)
 {
-	u64 h = (u64)dev * 0x9e3779b97f4a7c15ULL ^ (ino + 0x165667b19e3779f9ULL);
+	u64 h = (u64)dev * 0x9e3779b97f4a7c15ULL ^
+		(ino + 0x165667b19e3779f9ULL);
 
 	return (u32)(h >> (64 - bits));
 }
@@ -134,7 +135,8 @@ static struct tosya_index *index_new(u32 bits)
 
 	if (ix == NULL)
 		return NULL;
-	ix->slot = kvzalloc((size_t)(1u << bits) * sizeof(*ix->slot), GFP_KERNEL);
+	ix->slot =
+		kvzalloc((size_t)(1u << bits) * sizeof(*ix->slot), GFP_KERNEL);
 	if (ix->slot == NULL) {
 		kfree(ix);
 		return NULL;
@@ -163,7 +165,8 @@ static struct tosya_shadow *index_get(u32 dev, u64 ino)
 		mask = span - 1u;
 		i = index_hash(ix->bits, dev, ino);
 		for (n = 0; n < span; n++) {
-			struct tosya_index_slot *slot = &ix->slot[(i + n) & mask];
+			struct tosya_index_slot *slot =
+				&ix->slot[(i + n) & mask];
 
 			if (slot->s == NULL)
 				break;
@@ -184,7 +187,8 @@ static struct tosya_index *index_grow_locked(void)
 	struct tosya_index *ni;
 	u32 bits, i;
 
-	old = rcu_dereference_protected(g_index, lockdep_is_held(&g_shadow_lock));
+	old = rcu_dereference_protected(g_index,
+					lockdep_is_held(&g_shadow_lock));
 	if (old != NULL && old->bits >= TOSYA_INDEX_MAX_BITS)
 		return NULL;
 	bits = old != NULL ? old->bits + 1u : TOSYA_INDEX_MIN_BITS;
@@ -195,11 +199,13 @@ static struct tosya_index *index_grow_locked(void)
 		u32 span = 1u << ni->bits, mask = span - 1u;
 		u32 j, k;
 
-		if (old->slot[i].s == NULL || old->slot[i].s == TOSYA_INDEX_TOMB)
+		if (old->slot[i].s == NULL ||
+		    old->slot[i].s == TOSYA_INDEX_TOMB)
 			continue;
 		j = index_hash(ni->bits, old->slot[i].dev, old->slot[i].ino);
 		for (k = 0; k < span; k++) {
-			struct tosya_index_slot *slot = &ni->slot[(j + k) & mask];
+			struct tosya_index_slot *slot =
+				&ni->slot[(j + k) & mask];
 
 			if (slot->s == NULL || slot->s == TOSYA_INDEX_TOMB) {
 				if (slot->s == NULL)
@@ -226,7 +232,8 @@ static void index_put(u32 dev, u64 ino, struct tosya_shadow *s)
 	if (ix == NULL || ix->used * 2u >= (1u << ix->bits)) {
 		ix = index_grow_locked();
 		if (ix == NULL) {
-			pr_warn_once("tosya: the apk index is full; later apks cannot be shadowed\n");
+			pr_warn_once(
+				"tosya: the apk index is full; later apks cannot be shadowed\n");
 			return;
 		}
 	}
@@ -263,7 +270,8 @@ static void index_del(u32 dev, u64 ino)
 
 		if (slot->s == NULL)
 			return;
-		if (slot->s != TOSYA_INDEX_TOMB && slot->dev == dev && slot->ino == ino) {
+		if (slot->s != TOSYA_INDEX_TOMB && slot->dev == dev &&
+		    slot->ino == ino) {
 			WRITE_ONCE(slot->s, TOSYA_INDEX_TOMB);
 			return;
 		}
@@ -323,7 +331,8 @@ static struct tosya_shadow *shadow_find(u32 dev, u64 ino)
  * would write the same table, so no lock is taken. What matters is that no reader sees a table that
  * is not finished: inode->i_fop is published only after the table is complete.
  */
-static void shadow_build(struct tosya_shadow *s, const struct file_operations *cur)
+static void shadow_build(struct tosya_shadow *s,
+			 const struct file_operations *cur)
 {
 	struct file_operations copy = *cur;
 
@@ -344,13 +353,15 @@ static int shadow_arm(u32 dev, u64 ino, u32 uid)
 	const u32 app = uid % 100000u;
 	struct tosya_shadow *s;
 
-	if (!ino || app < TOSYA_APP_MIN || app >= TOSYA_APP_MIN + TOSYA_APP_SPAN)
+	if (!ino || app < TOSYA_APP_MIN ||
+	    app >= TOSYA_APP_MIN + TOSYA_APP_SPAN)
 		return -EINVAL;
 	if (shadow_find(dev, ino) != NULL)
-		return 0;	/* this file is already named */
+		return 0; /* this file is already named */
 	if (g_shadow_n >= TOSYA_APK_MAX) {
-		pr_warn_once("tosya: %u app apk(s) are named and the rest cannot be\n",
-			     g_shadow_n);
+		pr_warn_once(
+			"tosya: %u app apk(s) are named and the rest cannot be\n",
+			g_shadow_n);
 		return -ENOSPC;
 	}
 	s = kzalloc(sizeof(*s), GFP_KERNEL);
@@ -416,7 +427,7 @@ bool tosya_apk_shadow_apply(struct inode *inode)
 	if (s->orig_fops == NULL)
 		shadow_build(s, cur);
 	else if (cur != READ_ONCE(s->orig_fops))
-		return false;	/* another table: never replaced */
+		return false; /* another table: never replaced */
 	WRITE_ONCE(inode->i_fop, &s->fops);
 	return true;
 }
@@ -493,7 +504,6 @@ int tosya_apk_stream(u32 op, u32 uid, u32 dev, u64 ino, const char *path,
 	return rc;
 }
 
-
 /*
  * End of a stream: entries outside this generation leave. Parking is leaving -- lookups skip them,
  * and the record itself stays allocated, because an inode may still be pointing at its table: the
@@ -514,7 +524,8 @@ u32 tosya_apk_stream_finish(void)
 				attached++;
 		}
 	mutex_unlock(&g_shadow_lock);
-	pr_info("tosya: apk records: %u active, %u have encountered an inode\n", left, attached);
+	pr_info("tosya: apk records: %u active, %u have encountered an inode\n",
+		left, attached);
 	return left;
 }
 

@@ -40,7 +40,8 @@ int tosya_inline_veneer(void *out, size_t out_size, unsigned long target,
 #include <linux/kernel.h>
 static void entry_complain(const char *why, size_t offset, unsigned int word)
 {
-	pr_info("tosya: entry refused: %s at +%zu, word 0x%08x\n", why, offset, word);
+	pr_info("tosya: entry refused: %s at +%zu, word 0x%08x\n", why, offset,
+		word);
 }
 #else
 static void entry_complain(const char *why, size_t offset, unsigned int word)
@@ -187,15 +188,16 @@ int tosya_inline_trampoline(void *out, size_t out_size, const void *from,
 		    (unsigned long)out + prefix + TOSYA_INLINE_INSN)
 		return TOSYA_INLINE_EINSN;
 	if (entry_landing(src[0]) != (patch_offset == TOSYA_INLINE_INSN)) {
-		entry_complain("entry is not the landing the veneer asked for", 0,
-			       src[0]);
+		entry_complain("entry is not the landing the veneer asked for",
+			       0, src[0]);
 		return TOSYA_INLINE_EINSN;
 	}
 	for (offset = 0; offset < prefix; offset += TOSYA_INLINE_INSN) {
 		const unsigned int word = src[offset / TOSYA_INLINE_INSN];
 
 		if (!entry_displaceable(word)) {
-			entry_complain("instruction cannot be displaced", offset, word);
+			entry_complain("instruction cannot be displaced",
+				       offset, word);
 			return TOSYA_INLINE_EINSN;
 		}
 	}
@@ -203,8 +205,10 @@ int tosya_inline_trampoline(void *out, size_t out_size, const void *from,
 		size_t i;
 
 		for (i = 0; i < prefix / TOSYA_INLINE_INSN; ++i)
-			entry_complain("prefix word", i * TOSYA_INLINE_INSN, src[i]);
-		entry_complain("a pc-relative target leaves the moved window", 0, 0);
+			entry_complain("prefix word", i * TOSYA_INLINE_INSN,
+				       src[i]);
+		entry_complain("a pc-relative target leaves the moved window",
+			       0, 0);
 		return TOSYA_INLINE_EINSN;
 	}
 

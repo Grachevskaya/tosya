@@ -85,7 +85,6 @@ static struct policy g_empty = {
  * whole. */
 struct policy *g_pol __rcu = &g_empty;
 
-
 struct apply_pair {
 	u32 caller;
 	u32 target;

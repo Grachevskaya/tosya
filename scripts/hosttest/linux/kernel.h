@@ -4,7 +4,7 @@
 #include <stdio.h>
 #define READ_ONCE(x) (x)
 
-/* the host build has no attributes to model */
+// the host build has no attributes to model
 #ifndef __always_inline
 #define __always_inline inline
 #endif
@@ -25,9 +25,9 @@
 		*(ptr) = (value);     \
 	} while (0)
 #define smp_load_acquire(ptr) (*(ptr))
-/* one thread: a write barrier orders nothing here */
+// one thread: a write barrier orders nothing here
 #define smp_wmb() \
-	do {     \
+	do {      \
 	} while (0)
 #define pr_info(fmt, ...) fprintf(stderr, "[info] " fmt, ##__VA_ARGS__)
 #define pr_warn(fmt, ...) fprintf(stderr, "[warn] " fmt, ##__VA_ARGS__)

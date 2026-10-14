@@ -51,30 +51,34 @@ int tosya_setuid_inline_hook(struct cred *, const struct cred *, int);
 					   ".size " name ", . - " name "\n"    \
 					   ".size " original ", . - " original \
 					   "\n"
-asm(".pushsection \".text.tosya_inline\",\"ax\"\n" TOSYA_ASM_COPY("g_unlock_inode_copy", "tosya_unlock_inode_orig")
-	TOSYA_ASM_STUB("tosya_unlock_inode_stub", "", "tosya_unlock_inode_hook")
-	TOSYA_ASM_STUB("tosya_unlock_inode_pacia_stub", "\tautiasp\n",
-		       "tosya_unlock_inode_hook")
-	TOSYA_ASM_STUB("tosya_unlock_inode_pacib_stub", "\tautibsp\n",
-		       "tosya_unlock_inode_hook") TOSYA_ASM_COPY(
-	"g_find_user_copy",
-	"tosya_find_user_orig") TOSYA_ASM_STUB("tosya_find_user_stub", "",
-					       "tosya_find_user_hook")
+asm(".pushsection \".text.tosya_inline\",\"ax\"\n" TOSYA_ASM_COPY(
+	"g_unlock_inode_copy",
+	"tosya_unlock_inode_orig") TOSYA_ASM_STUB("tosya_unlock_inode_stub", "",
+						  "tosya_unlock_inode_hook")
 	    TOSYA_ASM_STUB(
-		    "tosya_find_user_pacia_stub", "\tautiasp\n",
-		    "tosya_find_user_hook") TOSYA_ASM_STUB("tosya_find_user_pacib_stub",
-							   "\tautibsp\n",
-							   "tosya_find_user_hook")
-		    TOSYA_ASM_COPY("g_setuid_copy", "tosya_setuid_orig") TOSYA_ASM_STUB(
-			    "tosya_setuid_stub", "", "tosya_setuid_inline_hook")
-			    TOSYA_ASM_STUB("tosya_setuid_pacia_stub",
-					   "\tautiasp\n",
-					   "tosya_setuid_inline_hook")
-				    TOSYA_ASM_STUB(
-					    "tosya_setuid_pacib_stub",
-					    "\tautibsp\n",
-					    "tosya_setuid_inline_hook")
-						".popsection\n");
+		    "tosya_unlock_inode_pacia_stub", "\tautiasp\n",
+		    "tosya_unlock_inode_hook") TOSYA_ASM_STUB("tosya_unlock_inode_pacib_stub",
+							      "\tautibsp\n",
+							      "tosya_unlock_inode_hook")
+		    TOSYA_ASM_COPY("g_find_user_copy", "tosya_find_user_orig") TOSYA_ASM_STUB(
+			    "tosya_find_user_stub", "",
+			    "tosya_find_user_hook") TOSYA_ASM_STUB("tosya_find_user_pacia_stub",
+								   "\tautiasp\n",
+								   "tosya_find_user_hook")
+			    TOSYA_ASM_STUB(
+				    "tosya_find_user_pacib_stub", "\tautibsp\n",
+				    "tosya_find_user_hook") TOSYA_ASM_COPY("g_setuid_copy",
+									   "tosya_setuid_orig")
+				    TOSYA_ASM_STUB("tosya_setuid_stub", "",
+						   "tosya_setuid_inline_hook")
+					    TOSYA_ASM_STUB(
+						    "tosya_setuid_pacia_stub",
+						    "\tautiasp\n",
+						    "tosya_setuid_inline_hook")
+						    TOSYA_ASM_STUB(
+							    "tosya_setuid_pacib_stub",
+							    "\tautibsp\n",
+							    "tosya_setuid_inline_hook") ".popsection\n");
 
 __attribute__((hot)) noinline struct user_struct *
 tosya_find_user_hook(kuid_t uid)

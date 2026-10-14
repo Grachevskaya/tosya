@@ -232,8 +232,11 @@ static int kaux_batch(struct sk_buff *skb, struct genl_info *info)
 		rc = kaux_batch_policy(b, p, words);
 		break;
 	case KAUX_KIND_TOKEN:
-		/* The first word is the batch count, NOT a word of the secret. */
-		if (b->count != 4u || words != 5u) { rc = -EINVAL; break; }
+		// The first word is the batch count, NOT a word of the secret.
+		if (b->count != 4u || words != 5u) {
+			rc = -EINVAL;
+			break;
+		}
 		memcpy(g_token, p + 1, sizeof(g_token));
 		break;
 	case KAUX_KIND_APKS:
@@ -251,7 +254,7 @@ static int kaux_batch(struct sk_buff *skb, struct genl_info *info)
 	return rc;
 }
 
-/* One owner through END. BEGIN cannot overwrite the policy buffer during apply. */
+// One owner through END. BEGIN cannot overwrite the policy buffer during apply.
 static int kaux_end(struct sk_buff *skb, struct genl_info *info)
 {
 	u32 kind, words, offered, failed;
@@ -279,7 +282,8 @@ static int kaux_end(struct sk_buff *skb, struct genl_info *info)
 		policy_apply(g_policy, words / 2u);
 	} else if (kind == KAUX_KIND_APKS) {
 		u32 left = tosya_apk_stream_finish();
-		pr_info("tosya: apk stream: %u record(s), %u in the table, %u refused\n", offered, left, failed);
+		pr_info("tosya: apk stream: %u record(s), %u in the table, %u refused\n",
+			offered, left, failed);
 		tosya_status_set_apks(left, offered, failed);
 		if (failed)
 			rc = -EIO;
@@ -315,7 +319,7 @@ static int kaux_status(struct sk_buff *skb, struct genl_info *info)
 
 	tosya_status_get(&st);
 
-	/* APK counters are owned by tosya_status_set_apks, never by token/name streams. */
+	// APK counters are owned by tosya_status_set_apks, never by token/name streams.
 
 	out = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
 	if (!out)
