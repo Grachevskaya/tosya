@@ -3,8 +3,8 @@
  * netlink.c - privileged BEGIN/BATCH/END streams (include/kaux.h).
  * One netlink port owns the stream until END or a five-second idle timeout.
  * Policy pairs are collected and replaced at END. APK records apply incrementally;
- * END reports per-record failures and counts active records. Token/socket/name batches
- * have their own layouts and must never overwrite the APK status counters.
+ * END reports per-record failures and counts active records. Token and name batches have
+ * their own layouts and must never overwrite the APK status counters.
  */
 
 #include "tosya.h"
@@ -236,17 +236,6 @@ static int kaux_batch(struct sk_buff *skb, struct genl_info *info)
 		if (b->count != 4u || words != 5u) { rc = -EINVAL; break; }
 		memcpy(g_token, p + 1, sizeof(g_token));
 		break;
-	case KAUX_KIND_ZYGOTE:
-		/* batch count, socket count, then (encoded dev, ino low, ino high). */
-		if (words < 2u || b->count > 8u || p[1] != b->count || words != 2u + 3u * b->count) {
-			rc = -EINVAL;
-			break;
-		}
-		tosya_zygote_sockets_set(p + 2, b->count);
-		break;
-	case KAUX_KIND_NAMES:
-		rc = tosya_names_apply(p + 1, words - 1);
-		break;
 	case KAUX_KIND_APKS:
 		rc = kaux_batch_apks(b, p, words);
 		break;
@@ -331,10 +320,6 @@ static int kaux_status(struct sk_buff *skb, struct genl_info *info)
 	out = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
 	if (!out)
 		return -ENOMEM;
-	st.scrub_in_place = tosya_scrub_in_place;
-	st.scrub_runs = tosya_scrub_runs;
-	st.scrub_hits = tosya_scrub_hits;
-	st.scrub_names = tosya_scrub_names;
 	mutex_lock(&g_apply_lock);
 	memcpy(st.token, g_token, sizeof(g_token));
 	mutex_unlock(&g_apply_lock);

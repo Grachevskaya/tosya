@@ -11,8 +11,11 @@ import sys
 
 BEGIN = "/* TOSYA_SHADOW_BEGIN"
 END = "/* TOSYA_SHADOW_END */"
-NEEDED = ("tosya_shadow_open", "shadow_owner", "shadow_replace", "shadow_drop_id",
-          "igrab(", "kstrdup(", "fops.owner", "tosya_apk_remove")
+# shadow_owner, shadow_replace, igrab and kstrdup were the older design, where a whole
+# file_operations was replaced and a path was stored beside it. The block only swaps ->open now and
+# keeps numbers, so the pieces it must still contain are these.
+NEEDED = ("tosya_shadow_open", "shadow_arm(", "shadow_find(", "shadow_drop_id",
+          ".owner", "i_count", "tosya_apk_remove")
 
 
 def main() -> int:

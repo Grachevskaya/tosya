@@ -62,9 +62,6 @@ enum {
 /* The packages that are hidden, by name, for the cleanup that runs inside the zygote after a
  * fork. Names travel in the clear because they never leave kernel memory: nothing an app can
  * read holds them, so there is nothing for a hash to protect against here. */
-#define KAUX_KIND_NAMES 2u
-/* (dev, ino) of the sockets whose holder is the task that starts apps: the zygote's own. */
-#define KAUX_KIND_ZYGOTE 3u
 /* Sixteen bytes: the name both halves use for their exchange, worked out from an installation's
  * own secret. It travels here so that the half that has no way to read the secret can still know it. */
 #define KAUX_KIND_TOKEN 4u
@@ -108,13 +105,6 @@ struct kaux_policy_rec {
 };
 #define KAUX_POLICY_REC_WORDS 4u
 
-// One hidden package name: its length, a seed for the text that replaces it, and the bytes.
-struct kaux_name_rec {
-	unsigned int len; // bytes that follow this head
-	unsigned int seed; // seed for the same-length replacement
-};
-#define KAUX_NAME_REC_WORDS 2u
-
 /* What the module is doing, for the userspace half to show a user. Fixed size, so a
  * mismatch between the two ends is a checked error and not a misread. */
 struct kaux_status {
@@ -151,13 +141,7 @@ struct kaux_status {
 	unsigned int page_shift;
 	char uid_tier[32];
 	char setuid_tier[32];
-	// The fork cleanup: whether it is in place, how many rounds ran, how many names
-	// were taken out, and how big the list it works from is.
-	unsigned int scrub_in_place;
-	unsigned int scrub_runs;
-	unsigned int scrub_hits;
-	unsigned int scrub_names;
-	/* The name both halves use, four little endian words. */
+	// The name both halves use, four little endian words.
 	unsigned int token[4];
 };
 // the protocol's marker; "kaux" as bytes, kept as it is

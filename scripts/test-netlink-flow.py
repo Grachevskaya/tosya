@@ -40,12 +40,10 @@ static bool g_open;
 static u32 g_owner, g_kind, g_offered, g_failed, g_policy_words, g_policy_cap, g_last_offered;
 static unsigned long g_deadline;
 static u32 *g_policy, g_token[4];
-static u32 sockets[24], socket_n, names_calls, policy_n, status_calls, last_failed;
+static u32 policy_n, status_calls, last_failed;
 static u32 seen_dev; static u64 seen_ino;
 static int kaux_version(struct genl_info *i) { return 0; }
 static int kaux_blob(struct genl_info *i, const u32 **p, u32 *len) { *p=i->data; *len=i->len; return (*len<4 || *len%4) ? -EINVAL : 0; }
-static void tosya_zygote_sockets_set(const u32 *p,u32 n) { memcpy(sockets,p,12*n); socket_n=n; }
-static int tosya_names_apply(const u32 *p,u32 n) { names_calls++; return 0; }
 static void policy_apply(const u32 *p,u32 n) { policy_n=n; }
 static int tosya_apk_stream(u32 op,u32 uid,u32 dev,u64 ino,const char *path,u32 len) { seen_dev=dev; seen_ino=ino; return !ino ? -EINVAL : 0; }
 static u32 tosya_apk_stream_finish(void) { return 1; }
@@ -63,13 +61,15 @@ int main(void) {
   assert(batch(8,token,5)==-EPERM && end(8)==-EPERM);
   assert(batch(7,token,5)==0 && end(7)==0);
   assert(memcmp(g_token,token+1,16)==0);
-  u32 sk[]={2,2,10,1740,0,10,2,1};
-  assert(begin(7,KAUX_KIND_ZYGOTE)==0 && batch(7,sk,8)==0 && end(7)==0);
-  assert(socket_n==2 && sockets[0]==10 && sockets[1]==1740 && sockets[5]==1);
+  /* A kind beyond the last one is refused, and a refused BEGIN leaves no stream open. */
+  assert(begin(7,KAUX_KIND_MAX+1u)==-EINVAL && end(7)==-EPERM);
+  assert(memcmp(g_token,token+1,16)==0);
   assert(status_calls==0);
+  /* Kind 2 was the hidden-names list. It is retired with the fork cleanup, so the kernel half
+     must refuse it exactly like any kind it does not know. */
   u32 empty[]={0};
-  assert(begin(7,KAUX_KIND_NAMES)==0 && batch(7,empty,1)==0 && end(7)==0);
-  assert(names_calls==1 && status_calls==0);
+  assert(begin(7,2u)==0 && batch(7,empty,1)==-EINVAL && end(7)==-EPERM);
+  assert(status_calls==0);
   policy_n=99;
   assert(begin(7,KAUX_KIND_POLICY)==0 && end(7)==0 && policy_n==0);
   u32 record[]={1,KAUX_OP_ADD,10123,64820,0xabcdef01,0x12345678,4,0x006b7061};
@@ -84,7 +84,7 @@ int main(void) {
   assert(batch(9,token,5)==0 && end(9)==0);
   assert(!g_stream_lock && !g_apply_lock);
   free(g_policy);
-  puts("PASS production netlink handlers: token/socket offsets, owner isolation, timeout, malformed batch, empty policy/names, 64-bit APK identity, negative END ack");
+  puts("PASS production netlink handlers: token offsets, owner isolation, timeout, malformed batch, unknown kind, retired names kind, empty policy, 64-bit APK identity, negative END ack");
 }
 '''
 file = out / 'probe.c'

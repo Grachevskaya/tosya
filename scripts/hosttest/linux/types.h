@@ -11,6 +11,10 @@ typedef uint32_t u32;
 typedef uint64_t u64;
 typedef uint32_t uid_t;
 typedef u32 kuid_t;
+/* the kernel's pointer annotations; nothing to say in a host build */
+#ifndef __rcu
+#define __rcu
+#endif
 #define ____cacheline_aligned
 #ifndef ENOMEM
 #define ENOMEM 12

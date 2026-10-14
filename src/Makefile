@@ -40,7 +40,7 @@ KBUILD_ARGS := M=$(MDIR)
 endif
 
 obj-m += tosya.o
-tosya-objs := main.o patch.o inline.o inline_entry.o inline_alloc.o status.o tag.o inline_hooks.o fork_scrub.o hooks.o \
+tosya-objs := main.o patch.o inline.o inline_entry.o inline_alloc.o status.o tag.o inline_hooks.o hooks.o \
 	table_hooks.o inode_hook.o hooks.o policy.o lsm.o netlink.o tiers.o
 
 ifeq ($(strip $(LSE_HDR)$(SP_REG)$(KGDB_BRK)),)

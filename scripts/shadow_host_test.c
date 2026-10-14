@@ -66,6 +66,7 @@ struct inode {
 	unsigned long i_ino;
 	unsigned long i_state;
 	int i_count;
+	unsigned int i_mode; /* S_ISREG is asked of it */
 };
 
 struct file {
@@ -91,21 +92,13 @@ struct path {
 static int g_module;
 #define THIS_MODULE ((struct module *)&g_module)
 
-static bool g_kstrdup_fails;
-
 static void *tosya_kzalloc(size_t bytes)
 {
 	return calloc(1, bytes);
 }
 
-static char *tosya_kstrdup(const char *s)
-{
-	return g_kstrdup_fails ? NULL : strdup(s);
-}
-
-#define kzalloc(bytes, flags) tosya_kzalloc(bytes)
-#define kfree(p) free(p)
-#define kstrdup(s, flags) tosya_kstrdup(s)
+/* The block allocates through the shim's kzalloc/kfree (linux/slab.h, pulled in by the block's
+ * own include of linux/mm.h); these two are only for what this file builds by hand. */
 
 /* igrab() refuses an inode that is being freed -- that is what makes reading its
  * fields safe -- and iput() gives the reference back; the last one evicts the
@@ -189,9 +182,14 @@ static void path_put(struct path *p)
 	iput(p->dentry->inode);
 }
 
+static struct super_block *host_user_get_super(dev_t dev, bool rw);
+
 static unsigned long tosya_lookup(const char *name)
 {
-	(void)name;
+	/* The block resolves the super block helper through this name, so the host hands it its own:
+	 * that is what lets the sweep put a file back and the unload path hand every record away. */
+	if (strcmp(name, "user_get_super") == 0)
+		return (unsigned long)&host_user_get_super;
 	return (unsigned long)fake_kern_path;
 }
 
@@ -216,6 +214,8 @@ static struct inode *new_inode(const struct file_operations *ops,
 	inode->i_sb = &g_sb;
 	inode->i_ino = ino;
 	inode->i_count = count;
+	/* A regular file: the shadow rule only applies to those (S_ISREG is asked of it). */
+	inode->i_mode = 0100644;
 	return inode;
 }
 
@@ -232,7 +232,57 @@ static void setup_b(int held)
 	d_b.inode = g_b;
 }
 
+/* The block sits inside the module's own APK-shadow switch, and the host has no inodes, so the
+ * state the block expects from around itself is declared here: production keeps it under
+ * #ifndef TOSYA_HOST_TEST, where this build never goes. */
+#define TOSYA_APK_SHADOW 1
+
+/* One thread here, so the RCU and barrier seams are the identity and every lock the caller asks
+ * about is one it holds. */
+#define rcu_read_lock() ((void)0)
+#define rcu_read_unlock() ((void)0)
+#define rcu_dereference(p) (p)
+#define rcu_dereference_protected(p, c) ((void)(c), (p))
+#define rcu_assign_pointer(p, v) ((p) = (v))
+#define smp_wmb() ((void)0)
+#define lockdep_is_held(lock) (1)
+#define pr_warn_once(...) ((void)0)
+#define S_ISREG(m) (((m) & 0170000) == 0100000)
+#define new_decode_dev(dev) (dev)
+
+/* What the block asks of the kernel around the table it installs: the lookup helper it calls under
+ * the super block lock, and the index it keeps for the files it shadowed. The host has no VFS, so
+ * these answer with the one superblock and the two inodes the scenarios build; the super block
+ * seam itself (g_user_get_super) is resolved at load time and stays NULL here, which the block
+ * handles by leaving the sweep alone. */
+typedef struct super_block *(*tosya_user_get_super_t)(dev_t dev, bool rw);
+struct tosya_index;
+static struct tosya_index *g_index;
+
+static struct inode *ilookup(struct super_block *sb, unsigned long ino)
+{
+	if (sb != &g_sb)
+		return NULL;
+	if (ino == 100)
+		return g_a;
+	if (ino == 200)
+		return g_b;
+	return NULL;
+}
+
+static void drop_super(struct super_block *sb)
+{
+	(void)sb;
+}
+
 #include "shadow_block.inc"
+
+/* What the kernel's user_get_super does for this build's single super block. */
+static struct super_block *host_user_get_super(dev_t dev, bool rw)
+{
+	(void)rw;
+	return dev == g_sb.s_dev ? &g_sb : NULL;
+}
 
 /* The block asks the tag record two questions (see tag.c): nothing here is
  * waiting for a name, and the name itself is what the test that follows checks
@@ -262,7 +312,9 @@ static int open_through(const struct file_operations *fops, struct inode *inode)
 static void scenario_early_put(void)
 {
 	setup_a(0);
-	assert(shadow_replace(kApkA, 10123) == 0);
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
+	/* The table is built when the rule first meets the file, which is what the inode hook does. */
+	tosya_apk_shadow_apply(g_a);
 	assert(g_shadow_n == 1);
 	assert(!g_shadow[0]->parked);
 	assert(g_shadow[0]->dev == tosya_encode_dev(g_sb.s_dev));
@@ -279,11 +331,13 @@ static void scenario_no_reuse(void)
 {
 	setup_a(1);
 	setup_b(0);
-	assert(shadow_replace(kApkA, 10123) == 0);
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
+	tosya_apk_shadow_apply(g_a);
 	shadow_drop_id(tosya_encode_dev(g_sb.s_dev), 100);
 	assert(g_shadow[0]->parked);
 
-	assert(shadow_replace(kApkB, 10456) == 0);
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 200, 10456) == 0);
+	tosya_apk_shadow_apply(g_b);
 	assert(g_shadow_n == 2);
 	assert(!g_shadow[1]->parked);
 	assert(g_shadow[1]->ino == 200);
@@ -301,31 +355,26 @@ static void scenario_no_reuse(void)
 static void scenario_readd(void)
 {
 	setup_a(1);
-	assert(shadow_replace(kApkA, 10123) == 0);
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
+	tosya_apk_shadow_apply(g_a);
 	shadow_drop_id(tosya_encode_dev(g_sb.s_dev), 100);
-	assert(shadow_replace(kApkA, 10123) == 0);
+	/* Putting the file back is the sweep's work in the kernel, and the host has no cache to
+	 * sweep: it happens here so that the second table is built from the file's own operations. */
+	g_a->i_fop = &ops_a;
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
+	tosya_apk_shadow_apply(g_a);
 	assert(g_shadow_n == 2);
 	assert(g_shadow[1]->orig_open != tosya_shadow_open);
 	assert(g_shadow[1]->orig_open == open_a);
 	assert(open_through(&g_shadow[1]->fops, g_a) == 11);
 }
 
-/* A record whose path cannot be stored is not installed: the write would leave an
- * inode pointing at a table that no path can find again at unload. */
-static void scenario_kstrdup_fail(void)
-{
-	setup_a(1);
-	g_kstrdup_fails = true;
-	assert(shadow_replace(kApkA, 10123) == -ENOMEM);
-	assert(g_shadow_n == 0);
-	assert(g_a->i_fop == &ops_a);
-}
-
 /* Unloading puts every file back and gives the records away. */
 static void scenario_remove(void)
 {
 	setup_a(1);
-	assert(shadow_replace(kApkA, 10123) == 0);
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
+	tosya_apk_shadow_apply(g_a);
 	assert(g_a->i_fop == &g_shadow[0]->fops);
 	tosya_apk_remove();
 	assert(g_shadow_n == 0);
@@ -336,7 +385,7 @@ int main(int argc, char **argv)
 {
 	if (argc != 2) {
 		fprintf(stderr,
-			"usage: %s <early-put|no-reuse|readd|kstrdup-fail|remove>\n",
+			"usage: %s <early-put|no-reuse|readd|remove>\n",
 			argv[0]);
 		return 2;
 	}
@@ -346,8 +395,6 @@ int main(int argc, char **argv)
 		scenario_no_reuse();
 	else if (!strcmp(argv[1], "readd"))
 		scenario_readd();
-	else if (!strcmp(argv[1], "kstrdup-fail"))
-		scenario_kstrdup_fail();
 	else if (!strcmp(argv[1], "remove"))
 		scenario_remove();
 	else

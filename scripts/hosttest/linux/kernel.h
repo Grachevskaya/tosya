@@ -25,9 +25,14 @@
 		*(ptr) = (value);     \
 	} while (0)
 #define smp_load_acquire(ptr) (*(ptr))
+/* one thread: a write barrier orders nothing here */
+#define smp_wmb() \
+	do {     \
+	} while (0)
 #define pr_info(fmt, ...) fprintf(stderr, "[info] " fmt, ##__VA_ARGS__)
 #define pr_warn(fmt, ...) fprintf(stderr, "[warn] " fmt, ##__VA_ARGS__)
 #define pr_err(fmt, ...) fprintf(stderr, "[err ] " fmt, ##__VA_ARGS__)
+#define pr_warn_once(fmt, ...) fprintf(stderr, "[warn] " fmt, ##__VA_ARGS__)
 static inline u32 ilog2(u32 x)
 {
 	u32 r = 0;

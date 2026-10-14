@@ -8,6 +8,49 @@
 #include <linux/types.h>
 #include <linux/uidgid.h>
 
+/* The bytes a token in memory is made of: everything a package name may hold, and nothing else. */
+static inline bool tosya_name_char(u8 c)
+{
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+	       c == '_' || c == '.';
+}
+
+/*
+ * A package name, by the platform's own rule and in its own order
+ * (FrameworkParsingPackageUtils.validateName): a segment starts with a letter, and digits and '_'
+ * only follow once one has been seen; '.' ends a segment and the next one starts over, so it too
+ * has to be followed by a letter. Anything else is not a package name -- '-' included.
+ *
+ * The same predicate decides what the table stores and what the userspace half is allowed to hand
+ * over: a name that fails it is never silently kept on one side only.
+ */
+static inline bool tosya_package_name_ok(const u8 *name, u32 len)
+{
+	bool front = true;
+	u32 i;
+
+	if (len == 0)
+		return false;
+	for (i = 0; i < len; i++) {
+		u8 c = name[i];
+
+		if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			front = false;
+			continue;
+		}
+		if (!front && ((c >= '0' && c <= '9') || c == '_'))
+			continue;
+		if (c == '.') {
+			front = true;
+			continue;
+		}
+		return false;
+	}
+	/* Only the characters are judged here, in the platform's own order. Whether a separator is
+	 * required and how long a name may be are the callers' rules, the same way they are there. */
+	return true;
+}
+
 // more than the host test's largest policy carries
 #define POLICY_MAX_PAIRS 65536
 
@@ -130,12 +173,10 @@ u32 policy_lookup_as(uid_t caller, uid_t target);
  */
 struct inode;
 /* Matching a token costs its length, not the size of the list. Returns the matched length. */
-u32 tosya_names_trie_match(const u8 *name, u32 len, u32 *seed_out);
 /* cp_new_stat()'s encoding, shared by everything that names a file by its numbers. */
 u32 tosya_encode_dev(dev_t s_dev);
 
 /* The sockets whose holder is the task that starts apps, given at runtime. */
-void tosya_zygote_sockets_set(const u32 *pairs, u32 npairs);
 
 bool tosya_apk_shadow_apply(struct inode *inode);
 void tosya_apk_shadow_sweep(void);
@@ -278,16 +319,6 @@ void tosya_status_set_apks(unsigned int inodes, unsigned int expected,
 			   unsigned int failed);
 void tosya_status_note(int error);
 
-/* The hidden names travel in the clear, for the cleanup that runs inside the zygote. */
-int tosya_names_apply(const u32 *words, u32 nwords);
-extern u32 g_names_gen;
-extern unsigned int tosya_scrub_in_place, tosya_scrub_runs, tosya_scrub_hits,
-	tosya_scrub_names;
-u32 tosya_names_bytes(void);
-u32 tosya_names_copy(void *out, u32 out_size);
-void tosya_names_free(void);
-void tosya_fork_scrub(long pid);
-int tosya_fork_scrub_install(void);
 int tosya_unlock_inode_install(void);
 
 int policy_init(void);

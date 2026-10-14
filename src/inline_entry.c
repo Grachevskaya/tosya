@@ -107,6 +107,12 @@ static int entry_body_safe(const unsigned int *src, size_t len,
 		unsigned long target;
 		unsigned int bits = 0, field = 0;
 
+		/* An indirect branch keeps its destination in a register: there is no field here to
+		 * read and nothing to redirect, so a replay of it could carry a target this path never
+		 * wrote. Refused, the same way a branch back into the patch is. */
+		if ((word & 0xfffffc1fu) == 0xd61f0000u ||
+		    (word & 0xfffffc1fu) == 0xd63f0000u)
+			return 0;
 		if ((word & 0x7c000000u) == 0x14000000u) {
 			bits = 26;
 			field = word & 0x03ffffffu;

@@ -74,12 +74,6 @@ asm(".pushsection \".text.tosya_inline\",\"ax\"\n" TOSYA_ASM_COPY("g_unlock_inod
 					    "tosya_setuid_pacib_stub",
 					    "\tautibsp\n",
 					    "tosya_setuid_inline_hook")
-		TOSYA_ASM_COPY("g_wake_up_copy", "tosya_wake_up_orig")
-			TOSYA_ASM_STUB("tosya_wake_up_stub", "", "tosya_wake_up_hook")
-				TOSYA_ASM_STUB("tosya_wake_up_pacia_stub", "\tautiasp\n",
-					       "tosya_wake_up_hook")
-					TOSYA_ASM_STUB("tosya_wake_up_pacib_stub", "\tautibsp\n",
-						       "tosya_wake_up_hook")
 						".popsection\n");
 
 __attribute__((hot)) noinline struct user_struct *
@@ -331,51 +325,13 @@ free_region:
 }
 
 /*
- * The forking side: wake_up_new_task. Every fork path the kernel has -- clone, clone3, the 32-bit
- * entry, vfork, kernel_thread -- reaches it, and it is the one point in the parent after
- * copy_process has built the new task. Our work runs after it returns.
+ * The fork cleanup used to live here: a wake_up_new_task hook that took a hidden package's start
+ * arguments out of the parent's heap right after a fork, so the next process forked out of the
+ * zygote would not inherit them. The platform's own USAP pool does that job from the other side
+ * now -- a pool clone reads the start command itself and becomes the app, so the zygote never holds
+ * it at all -- and this module asks for that pool instead. The hook, its module parameter and the
+ * counters it used to move went with it.
  */
-extern u32 g_wake_up_copy[];
-extern void tosya_wake_up_orig(struct task_struct *p);
-extern void tosya_wake_up_stub(struct task_struct *p);
-extern void tosya_wake_up_pacia_stub(struct task_struct *p);
-extern void tosya_wake_up_pacib_stub(struct task_struct *p);
-void tosya_wake_up_hook(struct task_struct *p);
-
-static struct tosya_inline_hook g_wake_up = {
-	.name = "wake_up_new_task",
-	.copy = g_wake_up_copy,
-	.hook = (unsigned long)tosya_wake_up_hook,
-	.stub = (unsigned long)tosya_wake_up_stub,
-	.pacia_stub = (unsigned long)tosya_wake_up_pacia_stub,
-	.pacib_stub = (unsigned long)tosya_wake_up_pacib_stub,
-};
-
-static bool tosya_fork_scrub_on = true;
-module_param_named(fork_scrub, tosya_fork_scrub_on, bool, 0644);
-MODULE_PARM_DESC(fork_scrub,
-		 "take hidden names out of the parent after a fork (default 1)");
-
-__attribute__((hot)) noinline void tosya_wake_up_hook(struct task_struct *p)
-{
-	tosya_wake_up_orig(p);
-	if (tosya_fork_scrub_on)
-		tosya_fork_scrub(task_pid_vnr(p));
-}
-
-int tosya_fork_scrub_install(void)
-{
-	int rc = inline_install(&g_wake_up);
-
-	if (rc)
-		pr_info("tosya: the fork cleanup is not in place (%d)\n", rc);
-	else
-		pr_info("tosya: the fork cleanup is in place\n");
-	if (rc)
-		tosya_status_note(rc);
-	tosya_scrub_in_place = rc == 0;
-	return rc;
-}
 
 /*
  * The inode cache. A shadow lives in the inode's i_fop, and an inode can be reclaimed, so the
