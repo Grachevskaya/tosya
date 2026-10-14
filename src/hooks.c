@@ -48,7 +48,8 @@ int hooks_install(void)
 	 * syscalls asks on its USER lookup path. One find_user entry hook serves
 	 * the native and compat callers.
 	 */
-	(void)tosya_unlock_inode_install();
+	if (tosya_unlock_inode_install())
+		pr_warn("tosya: the inode unlock hook is not in place; names are not shadowed\n");
 
 	uid = tosya_tier_install(TOSYA_TIER_UID, tosya_uid_tier);
 	tosya_status_set_uid_tier(tosya_tier_name(TOSYA_TIER_UID));

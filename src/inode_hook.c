@@ -64,7 +64,8 @@ struct tosya_shadow {
 	/*
 	 * A record whose file is gone. It stays allocated -- a task may still be holding the pointer it
 	 * read from that inode -- and is reused by the next replacement, so the array is bounded by
-	 * TOSYA_APK_MAX for the life of the module and the memory is freed at unload.
+	 * TOSYA_APK_MAX records ever installed, not live ones, and the memory is freed at unload:
+	 * a record is parked for good, because an inode may still be pointing at its table.
 	 */
 	bool parked;
 };
@@ -139,7 +140,7 @@ static struct tosya_index *index_new(u32 bits)
 }
 
 static struct tosya_index *index_grow_locked(void);
-static void index_put(u32 dev, u64 ino, struct tosya_shadow *s);
+static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s);
 
 static struct tosya_shadow *index_get(u32 dev, u64 ino)
 {
@@ -217,7 +218,7 @@ static struct tosya_index *index_grow_locked(void)
 	return ni;
 }
 
-static void index_put(u32 dev, u64 ino, struct tosya_shadow *s)
+static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s)
 {
 	struct tosya_index *ix = g_index;
 	u32 span, mask, i, n;
@@ -227,7 +228,7 @@ static void index_put(u32 dev, u64 ino, struct tosya_shadow *s)
 		if (ix == NULL) {
 			pr_warn_once(
 				"tosya: the apk index is full; later apks cannot be shadowed\n");
-			return;
+			return false;
 		}
 	}
 	span = 1u << ix->bits;
@@ -243,9 +244,11 @@ static void index_put(u32 dev, u64 ino, struct tosya_shadow *s)
 			slot->dev = dev;
 			slot->ino = ino;
 			WRITE_ONCE(slot->s, s);
-			return;
+			return true;
 		}
 	}
+
+	return false;
 }
 
 static void index_del(u32 dev, u64 ino)
@@ -364,7 +367,16 @@ static int shadow_arm(u32 dev, u64 ino, u32 uid)
 	s->dev = dev;
 	s->ino = ino;
 	g_shadow[g_shadow_n++] = s;
-	index_put(s->dev, s->ino, s);
+	/*
+	 * A record the index did not take is a record nothing will ever look up or sweep:
+	 * it would be reported as named while the kernel matches nothing by it. Take it back
+	 * out here, so the table and the index say the same thing.
+	 */
+	if (!index_put(s->dev, s->ino, s)) {
+		g_shadow_n--;
+		kfree(s);
+		return -ENOSPC;
+	}
 	return 0;
 }
 
