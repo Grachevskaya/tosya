@@ -29,13 +29,6 @@
 #include "kaux.h"
 #include <linux/string.h> /* strcmp: a stream entry is claimed by its path */
 
-/*
- * The apk side, off as a whole while the crash that comes with it is chased: with this at 0 no
- * record is taken, no inode is asked for, nothing is replaced, and nothing is swept. Flip it to 1
- * to bring the whole mechanism back -- the code below is untouched.
- */
-#define TOSYA_APK_SHADOW 1
-
 // the host test has no inodes to shadow
 #ifndef TOSYA_HOST_TEST
 /* TOSYA_SHADOW_BEGIN: scripts/extract_shadow.py lifts this block into the host test */
@@ -412,8 +405,6 @@ bool tosya_apk_shadow_apply(struct inode *inode)
 	const struct file_operations *cur;
 	struct tosya_shadow *s;
 
-	if (!TOSYA_APK_SHADOW)
-		return false;
 	if (inode == NULL || g_shadow_n == 0)
 		return false;
 	if (!S_ISREG(inode->i_mode))
@@ -488,8 +479,6 @@ int tosya_apk_stream(u32 op, u32 uid, u32 dev, u64 ino, const char *path,
 
 	(void)bytes;
 	(void)path;
-	if (!TOSYA_APK_SHADOW)
-		return 0;
 
 	if (op == KAUX_OP_DEL) {
 		mutex_lock(&g_shadow_lock);
@@ -513,8 +502,7 @@ u32 tosya_apk_stream_finish(void)
 {
 	u32 i, left = 0, attached = 0;
 
-	if (TOSYA_APK_SHADOW)
-		tosya_apk_shadow_sweep();
+	tosya_apk_shadow_sweep();
 
 	mutex_lock(&g_shadow_lock);
 	for (i = 0; i < g_shadow_n; i++)

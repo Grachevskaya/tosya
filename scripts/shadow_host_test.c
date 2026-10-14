@@ -232,11 +232,6 @@ static void setup_b(int held)
 	d_b.inode = g_b;
 }
 
-/* The block sits inside the module's own APK-shadow switch, and the host has no inodes, so the
- * state the block expects from around itself is declared here: production keeps it under
- * #ifndef TOSYA_HOST_TEST, where this build never goes. */
-#define TOSYA_APK_SHADOW 1
-
 /* One thread here, so the RCU and barrier seams are the identity and every lock the caller asks
  * about is one it holds. */
 #define rcu_read_lock() ((void)0)
