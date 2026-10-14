@@ -77,7 +77,7 @@ struct tosya_shadow {
 };
 
 // cp_new_stat() hands userspace this encoding of s_dev; match it by hand.
-static u32 tosya_encode_dev(dev_t s_dev)
+u32 tosya_encode_dev(dev_t s_dev)
 {
 	const u32 major = (u32)(s_dev >> 20) & 0xfffu;
 	const u32 minor = (u32)s_dev & 0xfffffu;

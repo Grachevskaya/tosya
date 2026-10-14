@@ -131,6 +131,12 @@ u32 policy_lookup_as(uid_t caller, uid_t target);
 struct inode;
 /* Matching a token costs its length, not the size of the list. Returns the matched length. */
 u32 tosya_names_trie_match(const u8 *name, u32 len, u32 *seed_out);
+/* cp_new_stat()'s encoding, shared by everything that names a file by its numbers. */
+u32 tosya_encode_dev(dev_t s_dev);
+
+/* The sockets whose holder is the task that starts apps, given at runtime. */
+void tosya_zygote_sockets_set(const u32 *pairs, u32 npairs);
+
 bool tosya_apk_shadow_apply(struct inode *inode);
 void tosya_apk_shadow_sweep(void);
 int tosya_apk_stream(u32 op, u32 uid, u32 dev, u64 ino, const char *path,

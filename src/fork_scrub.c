@@ -24,6 +24,7 @@
 #include <linux/mm.h>
 #include <linux/pagewalk.h>
 #include <linux/ptrace.h>
+#include <linux/fdtable.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
 #include <linux/sched/task.h>
@@ -205,20 +206,113 @@ struct tosya_scan {
  * its uid alone (su is root too), and not the last path component (a file may be named anything).
  * Root is still required beside it, and an app can be neither.
  */
-static bool tosya_is_zygote_parent(void)
-{
-	struct file *exe = current->mm ? current->mm->exe_file : NULL;
-	char buf[64];
-	char *path;
+/*
+ * Which task is the one that starts apps.
+ *
+ * Not a name and not an executable: the sockets. The child closes the zygote's server socket before
+ * it is specialized (ZygoteConnection.closeServerSocket), the pool processes keep theirs and accept
+ * on it, and nothing else on the system holds one -- a shell, su or an app that forks does not. The
+ * identities are handed over at runtime, because only the userspace half knows which inode its
+ * sockets have.
+ */
+#define TOSYA_ZYGOTE_SOCKETS_MAX 8u
+static u32 g_socket_dev[TOSYA_ZYGOTE_SOCKETS_MAX];
+static u64 g_socket_ino[TOSYA_ZYGOTE_SOCKETS_MAX];
+static u32 g_socket_n;
 
-	if (exe == NULL)
+void tosya_zygote_sockets_set(const u32 *pairs, u32 npairs)
+{
+	u32 i, n = min(npairs, TOSYA_ZYGOTE_SOCKETS_MAX);
+
+	for (i = 0; i < n; i++) {
+		g_socket_dev[i] = pairs[i * 3u];
+		g_socket_ino[i] = (u64)pairs[i * 3u + 1u] | ((u64)pairs[i * 3u + 2u] << 32);
+	}
+	WRITE_ONCE(g_socket_n, n);
+	pr_info("tosya: %u socket(s) say which task starts apps\n", n);
+}
+
+static bool tosya_holds_a_zygote_socket(void)
+{
+	struct files_struct *files = current->files;
+	struct fdtable *fdt;
+	unsigned int max, i;
+	u32 n, k;
+
+	n = READ_ONCE(g_socket_n);
+	if (n == 0 || files == NULL)
 		return false;
-	path = d_path(&exe->f_path, buf, sizeof(buf));
-	if (IS_ERR_OR_NULL(path))
-		return false;
-	return strcmp(path, "/system/bin/app_process64") == 0 ||
-	       strcmp(path, "/system/bin/app_process32") == 0 ||
-	       strcmp(path, "/system/bin/app_process") == 0;
+	rcu_read_lock();
+	fdt = files_fdtable(files);
+	max = fdt->max_fds;
+	for (i = 0; i < max; i++) {
+		struct file *file = rcu_dereference(fdt->fd[i]);
+		struct inode *inode;
+		u32 dev;
+		u64 ino;
+
+		if (file == NULL)
+			continue;
+		inode = file_inode(file);
+		if (inode == NULL || !S_ISSOCK(inode->i_mode))
+			continue;
+		dev = tosya_encode_dev(inode->i_sb->s_dev);
+		ino = inode->i_ino;
+		for (k = 0; k < n; k++)
+			if ((g_socket_dev[k] == 0u || g_socket_dev[k] == dev) &&
+			    g_socket_ino[k] == ino) {
+				rcu_read_unlock();
+				return true;
+			}
+	}
+	rcu_read_unlock();
+	return false;
+}
+
+/*
+ * The answer is per task and does not change while it lives, so it is remembered: a task that
+ * forks twice pays for the walk once. A stale entry cannot lie, because a task is recognised by
+ * the pair of its address and the moment it started.
+ */
+#define TOSYA_FORKERS 64u
+struct tosya_forker {
+	struct task_struct *task;
+	u64 start;
+	bool forker;
+};
+static struct tosya_forker g_forkers[TOSYA_FORKERS];
+static DEFINE_SPINLOCK(g_forkers_lock);
+static u32 g_forkers_next;
+
+static bool tosya_parent_starts_apps(void)
+{
+	struct task_struct *self = current;
+	u64 start = self->start_boottime;
+	u32 i, slot = TOSYA_FORKERS;
+	bool answer;
+
+	spin_lock(&g_forkers_lock);
+	for (i = 0; i < TOSYA_FORKERS; i++) {
+		if (g_forkers[i].task == self && g_forkers[i].start == start) {
+			answer = g_forkers[i].forker;
+			spin_unlock(&g_forkers_lock);
+			return answer;
+		}
+		if (g_forkers[i].task == NULL && slot == TOSYA_FORKERS)
+			slot = i;
+	}
+	if (slot == TOSYA_FORKERS)
+		slot = g_forkers_next++ % TOSYA_FORKERS;
+	spin_unlock(&g_forkers_lock);
+
+	answer = tosya_holds_a_zygote_socket();
+
+	spin_lock(&g_forkers_lock);
+	g_forkers[slot].task = self;
+	g_forkers[slot].start = start;
+	g_forkers[slot].forker = answer;
+	spin_unlock(&g_forkers_lock);
+	return answer;
 }
 
 
@@ -400,7 +494,7 @@ void tosya_fork_scrub(long pid)
 		return;
 	if (mm == NULL)
 		return;
-	if (!tosya_is_zygote_parent())
+	if (!tosya_parent_starts_apps())
 		return;
 	if (pid <= 0)
 		return;

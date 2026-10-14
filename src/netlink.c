@@ -240,6 +240,28 @@ static int kaux_batch(struct sk_buff *skb, struct genl_info *info)
 
 	if (g_kind == KAUX_KIND_POLICY)
 		return kaux_batch_policy(b, p, words);
+	if (g_kind == KAUX_KIND_ZYGOTE) {
+		/*
+		 * The sockets whose holder forks for apps. One message, one answer: the userspace half reads
+		 * them from the environment the zygote was started with, which is the only place their
+		 * numbers can be known from.
+		 */
+		static u32 words_out[8u * 3u];
+		u32 count = words > 0 ? p[0] : 0;
+		u32 i, k = 0;
+
+		if (count > 8u)
+			count = 8u;
+		for (i = 0; i < count && 1u + (i + 1u) * 3u <= words; i++) {
+			words_out[k++] = p[1u + i * 3u];
+			words_out[k++] = p[2u + i * 3u];
+			words_out[k++] = p[3u + i * 3u];
+		}
+		mutex_lock(&g_apply_lock);
+		tosya_zygote_sockets_set(words_out, k / 3u);
+		mutex_unlock(&g_apply_lock);
+		return 0;
+	}
 	if (g_kind == KAUX_KIND_NAMES) {
 		mutex_lock(&g_apply_lock);
 		tosya_names_apply(p + 1, words - 1);

@@ -63,7 +63,9 @@ enum {
  * fork. Names travel in the clear because they never leave kernel memory: nothing an app can
  * read holds them, so there is nothing for a hash to protect against here. */
 #define KAUX_KIND_NAMES 2u
-#define KAUX_KIND_MAX KAUX_KIND_NAMES
+/* (dev, ino) of the sockets whose holder is the task that starts apps: the zygote's own. */
+#define KAUX_KIND_ZYGOTE 3u
+#define KAUX_KIND_MAX KAUX_KIND_ZYGOTE
 
 // What a record does. Added to a set or taken out of it.
 #define KAUX_OP_ADD 0u
