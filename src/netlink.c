@@ -305,6 +305,15 @@ static int kaux_end(struct sk_buff *skb, struct genl_info *info)
 	mutex_unlock(&g_stream_lock);
 
 	mutex_lock(&g_apply_lock);
+	/*
+	 * The two kinds that are complete in one batch: their end carries nothing, and must not be
+	 * mistaken for an apk stream -- counting the table there would report a table nobody sent.
+	 */
+	if (kind == KAUX_KIND_TOKEN || kind == KAUX_KIND_ZYGOTE) {
+		mutex_unlock(&g_apply_lock);
+		return 0;
+	}
+
 	if (kind == KAUX_KIND_POLICY) {
 		pr_info("tosya: policy stream: %u pair(s)\n", words / 2u);
 		policy_apply(g_policy, words / 2u);
@@ -314,7 +323,7 @@ static int kaux_end(struct sk_buff *skb, struct genl_info *info)
 	} else {
 		u32 left = tosya_apk_stream_finish();
 
-		pr_info("tosya: apk stream: %u record(s), %u in the table\n",
+		pr_info("tosya: apk stream: %u record(s), %u in the table, %u refused\n",
 			offered, left);
 		/*
 		 * This is what the manager's card reads. Counted from the table itself, not from this
