@@ -3,7 +3,7 @@
 #include <linux/types.h>
 #endif
 
-/* host-test shim: the high bits of the real thing carry our identity tag */
+// host-test shim: the high bits of the real thing carry the module's identity tag
 struct thread_info {
 	unsigned long flags;
 };
@@ -18,7 +18,7 @@ struct task_struct {
 	struct cred *real_cred;
 };
 
-/* host-test shim: no SELinux, so the isolated path resolves nothing. */
+// host-test shim: no SELinux, so the isolated path resolves nothing.
 #define TOSYA_HOST_BUILD 1
 #define security_cred_getsecid(cred, sid) \
 	do {                              \
@@ -41,11 +41,11 @@ struct task_struct fake_current;
 	} while (0)
 #endif
 
-/* host-test shim for the 6.18 shape: an incomplete struct and no-op calls. */
+// host-test shim for the 6.18 shape: an incomplete struct and no-op calls.
 
-/* host-test shim: the pre-6.18 shape, which is what the host build selects. */
+// host-test shim: the pre-6.18 shape, which is what the host build selects.
 
-/* host-test shim: no task list, so the priming walk simply iterates nothing. */
+// host-test shim: no task list, so the priming walk iterates nothing.
 struct cred {
 	unsigned int fsuid;
 };

@@ -1,7 +1,7 @@
 #ifndef _FAKE_SPINLOCK_H
 #define _FAKE_SPINLOCK_H
 #include <linux/types.h>
-/* host-test shim: single-threaded; the irq state is whatever the caller had */
+// host-test shim: single-threaded; the irq state is whatever the caller had
 typedef struct {
 	int locked;
 } spinlock_t;

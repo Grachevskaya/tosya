@@ -220,8 +220,19 @@ static struct inode *new_inode(const struct file_operations *ops,
 }
 
 /* held = how many references the file has besides the one the lookup takes. */
+/* The module side of this test, declared before the block that defines it is included. */
+void tosya_apk_remove(void);
+
+/* The module side of this test, declared before the block that defines it is included. */
+void tosya_apk_remove(void);
+
 static void setup_a(int held)
 {
+	/*
+	 * The world every scenario starts in: what the last one left is given back first, tables and
+	 * all, so a record from it cannot answer for this one.
+	 */
+	tosya_apk_remove();
 	g_a = new_inode(&ops_a, 100, 1 + held);
 	d_a.inode = g_a;
 }
@@ -232,13 +243,11 @@ static void setup_b(int held)
 	d_b.inode = g_b;
 }
 
-/* One thread here, so the RCU and barrier seams are the identity and every lock the caller asks
- * about is one it holds. */
-#define rcu_read_lock() ((void)0)
-#define rcu_read_unlock() ((void)0)
-#define rcu_dereference(p) (p)
-#define rcu_dereference_protected(p, c) ((void)(c), (p))
-#define rcu_assign_pointer(p, v) ((p) = (v))
+/*
+ * The barrier and lock seams the block asks about, which one thread would not need and the
+ * contention scenario does. RCU is not among them: it comes from the stub, where a reader holds
+ * the read side for as long as it is in a table.
+ */
 #define smp_wmb() ((void)0)
 #define lockdep_is_held(lock) (1)
 #define pr_warn_once(...) ((void)0)
@@ -389,6 +398,11 @@ static void scenario_reads(void)
 	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
 	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 101, 10123) == 0);
 	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 102, 10124) == 0);
+	/*
+	 * A record is in the table a reader sees once the push has put it there: that is what keeps
+	 * the published table out of a writer's reach, and what these lookups are read through.
+	 */
+	(void)tosya_apk_stream_finish();
 
 	g_index_reads = 0;
 	assert(shadow_find(tosya_encode_dev(g_sb.s_dev), 100) != NULL);
@@ -438,11 +452,57 @@ static void scenario_reclaim(void)
 	fprintf(stderr, "shadow: reclaim PASS\n");
 }
 
+/*
+ * Readers and a writer at once. The readers only ever take the read side and the writer only ever
+ * takes the mutex and the write side, so a deadlock here is a lock order that does not exist, and a
+ * use-after-free is a record freed while a reader could still be inside it.
+ */
+static void *reader_thread(void *arg)
+{
+	u32 dev = tosya_encode_dev(g_sb.s_dev);
+	int i;
+
+	(void)arg;
+	for (i = 0; i < 40000; i++)
+		(void)shadow_find(dev, (u64)(100 + (i % 8)));
+	return NULL;
+}
+
+static void scenario_contend(void)
+{
+	pthread_t th[6];
+	u32 dev = tosya_encode_dev(g_sb.s_dev);
+	int i, t;
+
+	setup_a(1);
+	for (i = 0; i < 8; i++)
+		assert(shadow_arm(dev, (u64)(100 + i), 10123) == 0);
+	for (t = 0; t < 6; t++)
+		assert(pthread_create(&th[t], NULL, reader_thread, NULL) == 0);
+	for (i = 0; i < 200; i++) {
+		tosya_apk_shadow_apply(g_a);
+		tosya_apk_shadow_reclaim(g_a);
+		/*
+		 * The inode cache gives the inode up here, which in the kernel means the inode itself
+		 * goes with it: what is left of it in this test has to stop pointing at the record the
+		 * reclaim just marked, or the next round reads a table that is on its way out.
+		 */
+		g_a->i_fop = &ops_a;
+		(void)tosya_apk_stream_finish();
+		assert(shadow_arm(dev, 100, 10123) == 0);
+	}
+	for (t = 0; t < 6; t++)
+		assert(pthread_join(th[t], NULL) == 0);
+	tosya_apk_remove();
+	assert(g_shadow_n == 0);
+	fprintf(stderr, "shadow: contend PASS\n");
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
 		fprintf(stderr,
-			"usage: %s <early-put|no-reuse|readd|remove|reads|reclaim>\n",
+			"usage: %s <early-put|no-reuse|readd|remove|reads|reclaim|contend>\n",
 			argv[0]);
 		return 2;
 	}
@@ -458,6 +518,8 @@ int main(int argc, char **argv)
 		scenario_reads();
 	else if (!strcmp(argv[1], "reclaim"))
 		scenario_reclaim();
+	else if (!strcmp(argv[1], "contend"))
+		scenario_contend();
 	else
 		return 2;
 	printf("shadow: %s PASS\n", argv[1]);

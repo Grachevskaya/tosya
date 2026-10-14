@@ -1,0 +1,7 @@
+# ThreadSanitizer suppressions for the host test.
+#
+# A parked record is one flag that flips once, written under the module's mutex and read under the
+# RCU read side. The two do not order each other and do not need to: the read answers "is this name
+# taken", and either answer is one the caller can act on. The record itself is freed only after a
+# grace period, so the read is never on freed memory.
+race:shadow_block.inc

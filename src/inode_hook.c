@@ -127,7 +127,13 @@ struct tosya_index {
 	struct rcu_head rcu;
 };
 
+/*
+ * Two tables. What a reader sees is published and never written again, so a lookup cannot meet a
+ * slot that is halfway through being filled; what a push fills is this side of it, under the lock,
+ * and the push hands the finished one over in a single store.
+ */
 static struct tosya_index __rcu *g_index;
+static struct tosya_index *g_staging;
 
 /* How many slot reads one lookup costs, so a test can hold every lookup to one number. */
 static unsigned long g_index_reads;
@@ -314,6 +320,12 @@ static void index_rebuild_locked(void)
 	rcu_assign_pointer(g_index, ni);
 	if (old != NULL)
 		kvfree_rcu(old, rcu);
+	/*
+	 * What a push fills starts empty: a record is in the table a reader sees only once a push has
+	 * put it there, which is what keeps the published one out of a writer's reach.
+	 */
+	kvfree(g_staging);
+	g_staging = NULL;
 }
 
 static struct tosya_shadow *index_get(u32 dev, u64 ino)
@@ -325,26 +337,33 @@ static struct tosya_shadow *index_get(u32 dev, u64 ino)
 	ix = rcu_dereference(g_index);
 	if (ix != NULL)
 		found = index_lookup(ix, dev, ino);
+	/*
+	 * A parked record is one whose file is gone: the table stays, because an inode may still be
+	 * reading through it, but the name is not taken. The test is made here, inside the read
+	 * side, because a record this call returns can be freed the moment it returns.
+	 */
+	if (found != NULL && READ_ONCE(found->parked))
+		found = NULL;
 	rcu_read_unlock();
 	return found;
 }
 
 static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s)
 {
-	struct tosya_index *ix = g_index;
+	struct tosya_index *ix = g_staging;
 
 	if (ix == NULL) {
-		index_rebuild_locked();
-		ix = g_index;
+		ix = index_new(TOSYA_INDEX_MIN_BITS);
 		if (ix == NULL)
 			return false;
+		g_staging = ix;
 	}
 	if (index_insert(ix, dev, ino, s))
 		return true;
-	/* The stash is full: one rebuild gives every key a table sized to what is held. */
-	index_rebuild_locked();
-	ix = g_index;
-	return ix != NULL && index_insert(ix, dev, ino, s);
+	/* The stash is full: the push that follows builds a table sized to what is held. */
+	pr_warn_once(
+		"tosya: the apk index stash is full; later apks rely on their buckets\n");
+	return false;
 }
 
 static int tosya_shadow_open(struct inode *inode, struct file *file)
@@ -384,13 +403,20 @@ static int tosya_shadow_open(struct inode *inode, struct file *file)
 // One table per file, told apart by the numbers a helper can name it by.
 static struct tosya_shadow *shadow_find(u32 dev, u64 ino)
 {
-	struct tosya_shadow *s = index_get(dev, ino);
+	return index_get(dev, ino);
+}
 
-	/*
-	 * A parked record is one whose file is gone: the table stays, because an inode may still be
-	 * reading through it, but the name is not taken, so a file that comes back -- even at the
-	 * same inode number -- is given a record of its own.
-	 */
+/*
+ * The same question on the writing side, where the mutex is held: what a reader can see, and what
+ * the push that has not happened yet is holding. A parked record is not a name taken either way.
+ */
+static struct tosya_shadow *shadow_find_locked(u32 dev, u64 ino)
+{
+	struct tosya_shadow *s = shadow_find(dev, ino);
+
+	if (s != NULL || g_staging == NULL)
+		return s;
+	s = index_lookup(g_staging, dev, ino);
 	return (s != NULL && !s->parked) ? s : NULL;
 }
 
@@ -429,7 +455,7 @@ static int shadow_arm(u32 dev, u64 ino, u32 uid)
 	if (!ino || app < TOSYA_APP_MIN ||
 	    app >= TOSYA_APP_MIN + TOSYA_APP_SPAN)
 		return -EINVAL;
-	if (shadow_find(dev, ino) != NULL)
+	if (shadow_find_locked(dev, ino) != NULL)
 		return 0; /* this file is already named */
 	if (g_shadow_n >= TOSYA_APK_MAX) {
 		pr_warn_once(
@@ -502,8 +528,8 @@ void tosya_apk_shadow_reclaim(struct inode *inode)
 		return;
 	s = container_of(op, struct tosya_shadow, fops);
 	mutex_lock(&g_shadow_lock);
-	s->parked = true;
-	s->reclaimed = true;
+	WRITE_ONCE(s->parked, true);
+	WRITE_ONCE(s->reclaimed, true);
 	mutex_unlock(&g_shadow_lock);
 }
 
@@ -522,6 +548,17 @@ bool tosya_apk_shadow_apply(struct inode *inode)
 	if (!S_ISREG(inode->i_mode))
 		return false;
 	s = index_get(tosya_encode_dev(inode->i_sb->s_dev), inode->i_ino);
+	if (s == NULL && READ_ONCE(g_staging) != NULL) {
+		/*
+		 * A record this push has armed is not published yet: the table a reader sees only gets
+		 * it when the push ends. The lock is taken for that case alone, so the path every new
+		 * inode walks stays the lockless one.
+		 */
+		mutex_lock(&g_shadow_lock);
+		s = shadow_find_locked(tosya_encode_dev(inode->i_sb->s_dev),
+				       inode->i_ino);
+		mutex_unlock(&g_shadow_lock);
+	}
 	if (s == NULL)
 		return false;
 	cur = READ_ONCE(inode->i_fop);
@@ -702,6 +739,9 @@ void tosya_apk_remove(void)
 		/* A reader may still be in it: the table goes after the grace period, not before. */
 		synchronize_rcu();
 		kvfree(ix);
+		/* The side a push fills is not published and nothing reads it: it goes with the lock held. */
+		kvfree(g_staging);
+		g_staging = NULL;
 	}
 	mutex_unlock(&g_shadow_lock);
 }

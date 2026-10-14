@@ -11,21 +11,21 @@ set -eu
 cd "$(dirname "$0")/.."
 
 out=build/policy_host_test
-cc -O1 -g -DTOSYA_HOST_TEST -I src -I scripts/hosttest -I src/include -o "$out" scripts/policy_host_test.c
+cc -O1 -g -D_GNU_SOURCE -pthread -DTOSYA_HOST_TEST -I src -I scripts/hosttest -I src/include -o "$out" scripts/policy_host_test.c
 "$out"
 
 # The inline hook's runtime half: a real kernel function (find_user, taken from a
 # device image) is relocated here, and short trampoline prefixes, native resume
 # targets and refusals are checked alongside the entry patch.
 inline=build/inline_reloc_test
-clang -std=c23 -O1 -Wall -Wextra -Wno-unused-function -I src -I src/include -I scripts -o "$inline" \
+clang -std=c23 -O1 -Wall -Wextra -Wno-unused-function -D_GNU_SOURCE -pthread -I src -I src/include -I scripts -o "$inline" \
   scripts/inline_reloc_test.c src/inline.c src/inline_entry.c
 "$inline"
 
 # The fallback chains: the real tiers.c with a table of fakes, so that order,
 # forcing and what a revert takes back are checked without a kernel.
 tiers=build/tiers_test
-clang -std=c23 -O1 -Wall -Wextra -DTOSYA_HOST_TEST -I src -I src/include \
+clang -std=c23 -O1 -Wall -Wextra -D_GNU_SOURCE -pthread -DTOSYA_HOST_TEST -I src -I src/include \
   -I scripts/hosttest -o "$tiers" scripts/tiers_test.c
 "$tiers"
 
@@ -39,11 +39,21 @@ clang -std=c23 -O1 -Wall -Wextra -DTOSYA_HOST_TEST -I src -I src/include \
 # though its path could not be stored.
 python3 scripts/extract_shadow.py
 shadow=build/shadow_test
-clang -fsanitize=address,undefined -fno-omit-frame-pointer -std=c23 -O1 -g \
+clang -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -std=c23 -O1 -g \
   -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
   -Werror=invalid-pp-token -I build -I src/include -I scripts/hosttest -o "$shadow" \
   scripts/shadow_host_test.c
-for mode in early-put no-reuse readd remove reads reclaim; do
+for mode in early-put no-reuse readd remove reads reclaim contend; do
   "$shadow" "$mode"
 done
+
+# The same block under the thread sanitizer: six readers and a writer run at once there, and what
+# it is there to see is a record freed while a reader could still be inside it, or a lock order that
+# does not exist. It is built apart because the address sanitizer and this one cannot share a run.
+tsan=build/shadow_tsan
+clang -fsanitize=thread -fno-omit-frame-pointer -pthread -std=c23 -O1 -g \
+  -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
+  -Werror=invalid-pp-token -I build -I src/include -I scripts/hosttest -o "$tsan" \
+  scripts/shadow_host_test.c
+TSAN_OPTIONS="suppressions=$PWD/scripts/tsan.supp" "$tsan" contend
 
