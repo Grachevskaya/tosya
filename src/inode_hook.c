@@ -86,7 +86,9 @@ static DEFINE_MUTEX(g_shadow_lock);
 /*
  * The index the hot paths use: inode creation asks "is this one of ours" for every new inode,
  * so the answer has to be one or two memory reads, not a walk over the table. Open addressing,
- * power of two, and a key is only ever removed by parking its entry.
+ * power of two, and a key is only ever removed by parking its entry. The load that decides
+ * when the table doubles counts live records, not slots ever used, so a table that churns does
+ * not grow past what it holds and the probe stays short.
  */
 #define TOSYA_INDEX_MIN_BITS 12u
 #define TOSYA_INDEX_MAX_BITS 21u
@@ -239,7 +241,12 @@ static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s)
 
 		if (slot->s == NULL || slot->s == TOSYA_INDEX_TOMB ||
 		    (slot->dev == dev && slot->ino == ino)) {
-			if (slot->s == NULL)
+			/*
+			 * used is the live count, which is what the load is measured by: a slot that held
+			 * a record and was given up is reused here without growing the table, so only an
+			 * empty slot or a tombstone adds one. An update adds nothing.
+			 */
+			if (slot->s == NULL || slot->s == TOSYA_INDEX_TOMB)
 				ix->used++;
 			slot->dev = dev;
 			slot->ino = ino;
@@ -269,6 +276,7 @@ static void index_del(u32 dev, u64 ino)
 		if (slot->s != TOSYA_INDEX_TOMB && slot->dev == dev &&
 		    slot->ino == ino) {
 			WRITE_ONCE(slot->s, TOSYA_INDEX_TOMB);
+			ix->used--;
 			return;
 		}
 	}
