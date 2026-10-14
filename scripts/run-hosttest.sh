@@ -57,3 +57,25 @@ clang -fsanitize=thread -fno-omit-frame-pointer -pthread -std=c23 -O1 -g \
   scripts/shadow_host_test.c
 TSAN_OPTIONS="suppressions=$PWD/scripts/tsan.supp" "$tsan" contend
 
+# Every host test again under the address and undefined sanitizers, not only the block written for
+# them: the same source built this way checks a different set of things, and a fault that only shows
+# in one of them is still a fault. The thread sanitizer is not repeated here, because none of these
+# three has a second thread to share anything with.
+asan=build/policy_host_test_asan
+cc -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g -D_GNU_SOURCE -pthread \
+  -DTOSYA_HOST_TEST -I src -I scripts/hosttest -I src/include -o "$asan" \
+  scripts/policy_host_test.c
+"$asan"
+
+asan=build/inline_reloc_test_asan
+clang -fsanitize=address,undefined -fno-omit-frame-pointer -std=c23 -O1 -g \
+  -Wall -Wextra -Wno-unused-function -D_GNU_SOURCE -pthread -I src -I src/include -I scripts \
+  -o "$asan" scripts/inline_reloc_test.c src/inline.c src/inline_entry.c
+"$asan"
+
+asan=build/tiers_test_asan
+clang -fsanitize=address,undefined -fno-omit-frame-pointer -std=c23 -O1 -g \
+  -Wall -Wextra -D_GNU_SOURCE -pthread -DTOSYA_HOST_TEST -I src -I src/include \
+  -I scripts/hosttest -o "$asan" scripts/tiers_test.c
+"$asan"
+
