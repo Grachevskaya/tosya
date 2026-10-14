@@ -376,10 +376,43 @@ static void scenario_remove(void)
 	assert(g_a->i_fop == &ops_a);
 }
 
+/*
+ * A lookup costs the same whatever it finds: a hit, a miss and a key that had to wait in the
+ * stash all read the two buckets and every stash slot. The number is what the design is for, so it
+ * is asserted rather than described.
+ */
+static void scenario_reads(void)
+{
+	unsigned long first, again;
+
+	setup_a(1);
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 101, 10123) == 0);
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 102, 10124) == 0);
+
+	g_index_reads = 0;
+	assert(shadow_find(tosya_encode_dev(g_sb.s_dev), 100) != NULL);
+	first = g_index_reads;
+	g_index_reads = 0;
+	assert(shadow_find(tosya_encode_dev(g_sb.s_dev), 100) != NULL);
+	again = g_index_reads;
+	assert(first == again);
+	g_index_reads = 0;
+	assert(shadow_find(tosya_encode_dev(g_sb.s_dev), 999) == NULL);
+	assert(g_index_reads == first);
+	g_index_reads = 0;
+	assert(shadow_find(tosya_encode_dev(g_sb.s_dev) + 7u, 100) == NULL);
+	assert(g_index_reads == first);
+	fprintf(stderr,
+		"shadow: %lu read(s) per lookup, hit and miss alike PASS\n",
+		first);
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
-		fprintf(stderr, "usage: %s <early-put|no-reuse|readd|remove>\n",
+		fprintf(stderr,
+			"usage: %s <early-put|no-reuse|readd|remove|reads>\n",
 			argv[0]);
 		return 2;
 	}
@@ -391,6 +424,8 @@ int main(int argc, char **argv)
 		scenario_readd();
 	else if (!strcmp(argv[1], "remove"))
 		scenario_remove();
+	else if (!strcmp(argv[1], "reads"))
+		scenario_reads();
 	else
 		return 2;
 	printf("shadow: %s PASS\n", argv[1]);

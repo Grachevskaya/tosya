@@ -35,6 +35,7 @@
 // KAUX_OP_*: the actions a stream record carries
 #include "kaux.h"
 #include <linux/mm.h>
+#include <linux/rcupdate.h>
 
 /*
  * One record, and one table inside it, for one file: a record is never given to
@@ -84,14 +85,20 @@ static u32 g_shadow_n;
 
 static DEFINE_MUTEX(g_shadow_lock);
 /*
- * The index the hot paths use: inode creation asks "is this one of ours" for every new inode,
- * so the answer has to be one or two memory reads, not a walk over the table. Open addressing,
- * power of two, and a key is only ever removed by parking its entry. The load that decides
- * when the table doubles counts live records, not slots ever used, so a table that churns does
- * not grow past what it holds and the probe stays short.
+ * The index the hot paths use: inode creation asks "is this one of ours" for every new inode, so
+ * the answer costs the same for a hit and for a miss -- two bucket reads and a scan of the whole
+ * stash, which is a fixed four slots. A key has two candidate buckets; an insert that finds both
+ * taken moves one of their occupants to its own other bucket, for a bounded number of rounds, and a
+ * key that will not settle waits in the stash.
+ *
+ * Nothing is marked and nothing is removed between pushes: a stream ends with a rebuild that keeps
+ * only the records still live, so a table never carries the history of what it held, and the table
+ * it replaces is handed to RCU rather than kept.
  */
 #define TOSYA_INDEX_MIN_BITS 12u
 #define TOSYA_INDEX_MAX_BITS 21u
+#define TOSYA_INDEX_ROUNDS 8u
+#define TOSYA_INDEX_STASH 4u
 
 struct tosya_index_slot {
 	u32 dev;
@@ -109,20 +116,32 @@ struct tosya_index {
 	u32 bits;
 	u32 used;
 	struct tosya_index_slot *slot;
+	u32 stash_n;
+	struct tosya_index_slot stash[TOSYA_INDEX_STASH];
+	struct rcu_head rcu;
 };
 
 static struct tosya_index __rcu *g_index;
-static struct tosya_index *g_index_all[TOSYA_INDEX_MAX_BITS + 2u];
-static u32 g_index_all_n;
 
-#define TOSYA_INDEX_TOMB ((struct tosya_shadow *)1UL)
+/* How many slot reads one lookup costs, so a test can hold every lookup to one number. */
+static unsigned long g_index_reads;
+#define INDEX_READ() (g_index_reads++)
 
-static u32 index_hash(u32 bits, u32 dev, u64 ino)
+static u64 index_hash(u64 dev, u64 ino)
 {
-	u64 h = (u64)dev * 0x9e3779b97f4a7c15ULL ^
-		(ino + 0x165667b19e3779f9ULL);
+	return (u64)dev * 0x9e3779b97f4a7c15ULL ^ (ino + 0x165667b19e3779f9ULL);
+}
 
+/* The first candidate bucket. */
+static u32 index_bucket(u64 h, u32 bits)
+{
 	return (u32)(h >> (64 - bits));
+}
+
+/* The second: the same hash multiplied again, so the two do not move together. */
+static u32 index_other(u64 h, u32 bits)
+{
+	return (u32)((h * 0x9e3779b97f4a7c15ULL) >> (64 - bits));
 }
 
 static struct tosya_index *index_new(u32 bits)
@@ -141,145 +160,185 @@ static struct tosya_index *index_new(u32 bits)
 	return ix;
 }
 
-static struct tosya_index *index_grow_locked(void);
+static bool index_insert(struct tosya_index *ix, u32 dev, u64 ino,
+			 struct tosya_shadow *s);
+static void index_rebuild_locked(void);
 static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s);
 
-static struct tosya_shadow *index_get(u32 dev, u64 ino)
+/*
+ * One lookup: the two buckets the key can be in, then every stash slot. Nothing returns early,
+ * because the cost is what this table is for -- a hit and a miss have to be the same read.
+ */
+static struct tosya_shadow *index_lookup(struct tosya_index *ix, u32 dev,
+					 u64 ino)
 {
+	u64 h = index_hash(dev, ino);
+	u32 b1 = index_bucket(h, ix->bits);
+	u32 b2 = index_other(h, ix->bits);
 	struct tosya_shadow *found = NULL;
-	struct tosya_index *ix;
-	u32 span, mask, i, n;
+	u32 i;
 
-	/*
-	 * One snapshot for the whole walk: the bits and the slots come from the same object, so a
-	 * table that is replaced underneath this call cannot make it read past its end.
-	 */
-	rcu_read_lock();
-	ix = rcu_dereference(g_index);
-	if (ix != NULL) {
-		span = 1u << ix->bits;
-		mask = span - 1u;
-		i = index_hash(ix->bits, dev, ino);
-		for (n = 0; n < span; n++) {
-			struct tosya_index_slot *slot =
-				&ix->slot[(i + n) & mask];
-
-			if (slot->s == NULL)
-				break;
-			if (slot->s != TOSYA_INDEX_TOMB && slot->dev == dev &&
-			    slot->ino == ino) {
-				found = slot->s;
-				break;
-			}
-		}
+	if (b2 == b1)
+		b2 = b1 ^ 1u;
+	INDEX_READ();
+	if (ix->slot[b1].s != NULL && ix->slot[b1].dev == dev &&
+	    ix->slot[b1].ino == ino)
+		found = ix->slot[b1].s;
+	INDEX_READ();
+	if (ix->slot[b2].s != NULL && ix->slot[b2].dev == dev &&
+	    ix->slot[b2].ino == ino)
+		found = ix->slot[b2].s;
+	for (i = 0; i < TOSYA_INDEX_STASH; i++) {
+		INDEX_READ();
+		if (ix->stash[i].s != NULL && ix->stash[i].dev == dev &&
+		    ix->stash[i].ino == ino)
+			found = ix->stash[i].s;
 	}
-	rcu_read_unlock();
 	return found;
 }
 
-static struct tosya_index *index_grow_locked(void)
+static bool index_stash_put(struct tosya_index *ix, u32 dev, u64 ino,
+			    struct tosya_shadow *s)
 {
-	struct tosya_index *old;
-	struct tosya_index *ni;
-	u32 bits, i;
+	u32 i;
+
+	for (i = 0; i < TOSYA_INDEX_STASH; i++)
+		if (ix->stash[i].s == NULL) {
+			ix->stash[i].dev = dev;
+			ix->stash[i].ino = ino;
+			WRITE_ONCE(ix->stash[i].s, s);
+			ix->stash_n++;
+			return true;
+		}
+	return false;
+}
+
+/*
+ * Places one key. Both buckets taken means one occupant moves to its own other bucket, for a
+ * bounded number of rounds; a key that will not settle waits in the stash, and a stash that is
+ * full is the caller's signal to rebuild.
+ */
+static bool index_insert(struct tosya_index *ix, u32 dev, u64 ino,
+			 struct tosya_shadow *s)
+{
+	struct tosya_index_slot cur = { .dev = dev, .ino = ino, .s = s };
+	u64 h = index_hash(dev, ino);
+	u32 b1, b2, i;
+	u32 round;
+
+	/*
+	 * A key that is already here is replaced, not added again: a file that comes back at the
+	 * same inode number is given a table of its own, and the index has to point at the new one.
+	 */
+	b1 = index_bucket(h, ix->bits);
+	b2 = index_other(h, ix->bits);
+	if (b2 == b1)
+		b2 = b1 ^ 1u;
+	for (i = 0; i < 2; i++) {
+		struct tosya_index_slot *slot = &ix->slot[i ? b2 : b1];
+
+		if (slot->s != NULL && slot->dev == dev && slot->ino == ino) {
+			WRITE_ONCE(slot->s, s);
+			return true;
+		}
+	}
+	for (i = 0; i < TOSYA_INDEX_STASH; i++)
+		if (ix->stash[i].s != NULL && ix->stash[i].dev == dev &&
+		    ix->stash[i].ino == ino) {
+			WRITE_ONCE(ix->stash[i].s, s);
+			return true;
+		}
+
+	for (round = 0; round < TOSYA_INDEX_ROUNDS; round++) {
+		b1 = index_bucket(h, ix->bits);
+		b2 = index_other(h, ix->bits);
+
+		if (b2 == b1)
+			b2 = b1 ^ 1u;
+		if (ix->slot[b1].s == NULL) {
+			ix->slot[b1] = cur;
+			ix->used++;
+			return true;
+		}
+		if (ix->slot[b2].s == NULL) {
+			ix->slot[b2] = cur;
+			ix->used++;
+			return true;
+		}
+		cur = ix->slot[b1];
+		ix->slot[b1].dev = dev;
+		ix->slot[b1].ino = ino;
+		ix->slot[b1].s = s;
+		dev = cur.dev;
+		ino = cur.ino;
+		s = cur.s;
+		h = index_hash(dev, ino);
+	}
+	return index_stash_put(ix, dev, ino, s);
+}
+
+/*
+ * A fresh table holding what is live, published in one store. The table it replaces is handed to
+ * RCU: a reader that took it may still be in it, and nothing is kept past that grace period.
+ */
+static void index_rebuild_locked(void)
+{
+	struct tosya_index *old, *ni;
+	u32 bits, i, live = 0;
 
 	old = rcu_dereference_protected(g_index,
 					lockdep_is_held(&g_shadow_lock));
-	if (old != NULL && old->bits >= TOSYA_INDEX_MAX_BITS)
-		return NULL;
-	bits = old != NULL ? old->bits + 1u : TOSYA_INDEX_MIN_BITS;
+	for (i = 0; i < g_shadow_n; i++)
+		if (!g_shadow[i]->parked)
+			live++;
+	bits = TOSYA_INDEX_MIN_BITS;
+	while (bits < TOSYA_INDEX_MAX_BITS && (1u << (bits - 1u)) < live * 2u)
+		bits++;
 	ni = index_new(bits);
 	if (ni == NULL)
-		return NULL;
-	for (i = 0; old != NULL && i < (1u << old->bits); i++) {
-		u32 span = 1u << ni->bits, mask = span - 1u;
-		u32 j, k;
-
-		if (old->slot[i].s == NULL ||
-		    old->slot[i].s == TOSYA_INDEX_TOMB)
+		return;
+	for (i = 0; i < g_shadow_n; i++) {
+		if (g_shadow[i]->parked)
 			continue;
-		j = index_hash(ni->bits, old->slot[i].dev, old->slot[i].ino);
-		for (k = 0; k < span; k++) {
-			struct tosya_index_slot *slot =
-				&ni->slot[(j + k) & mask];
-
-			if (slot->s == NULL || slot->s == TOSYA_INDEX_TOMB) {
-				if (slot->s == NULL)
-					ni->used++;
-				slot->dev = old->slot[i].dev;
-				slot->ino = old->slot[i].ino;
-				WRITE_ONCE(slot->s, old->slot[i].s);
-				break;
-			}
-		}
+		if (!index_insert(ni, g_shadow[i]->dev, g_shadow[i]->ino,
+				  g_shadow[i]))
+			pr_warn_once(
+				"tosya: the apk index stash is full; later apks rely on their buckets\n");
 	}
-	/* kept, not freed: a reader may still be in the table this one replaces */
-	if (g_index_all_n < TOSYA_INDEX_MAX_BITS + 2u)
-		g_index_all[g_index_all_n++] = ni;
 	rcu_assign_pointer(g_index, ni);
-	return ni;
+	if (old != NULL)
+		kvfree_rcu(old, rcu);
+}
+
+static struct tosya_shadow *index_get(u32 dev, u64 ino)
+{
+	struct tosya_index *ix;
+	struct tosya_shadow *found = NULL;
+
+	rcu_read_lock();
+	ix = rcu_dereference(g_index);
+	if (ix != NULL)
+		found = index_lookup(ix, dev, ino);
+	rcu_read_unlock();
+	return found;
 }
 
 static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s)
 {
 	struct tosya_index *ix = g_index;
-	u32 span, mask, i, n;
 
-	if (ix == NULL || ix->used * 2u >= (1u << ix->bits)) {
-		ix = index_grow_locked();
-		if (ix == NULL) {
-			pr_warn_once(
-				"tosya: the apk index is full; later apks cannot be shadowed\n");
+	if (ix == NULL) {
+		index_rebuild_locked();
+		ix = g_index;
+		if (ix == NULL)
 			return false;
-		}
 	}
-	span = 1u << ix->bits;
-	mask = span - 1u;
-	i = index_hash(ix->bits, dev, ino);
-	for (n = 0; n < span; n++) {
-		struct tosya_index_slot *slot = &ix->slot[(i + n) & mask];
-
-		if (slot->s == NULL || slot->s == TOSYA_INDEX_TOMB ||
-		    (slot->dev == dev && slot->ino == ino)) {
-			/*
-			 * used is the live count, which is what the load is measured by: a slot that held
-			 * a record and was given up is reused here without growing the table, so only an
-			 * empty slot or a tombstone adds one. An update adds nothing.
-			 */
-			if (slot->s == NULL || slot->s == TOSYA_INDEX_TOMB)
-				ix->used++;
-			slot->dev = dev;
-			slot->ino = ino;
-			WRITE_ONCE(slot->s, s);
-			return true;
-		}
-	}
-
-	return false;
-}
-
-static void index_del(u32 dev, u64 ino)
-{
-	struct tosya_index *ix = g_index;
-	u32 span, mask, i, n;
-
-	if (ix == NULL)
-		return;
-	span = 1u << ix->bits;
-	mask = span - 1u;
-	i = index_hash(ix->bits, dev, ino);
-	for (n = 0; n < span; n++) {
-		struct tosya_index_slot *slot = &ix->slot[(i + n) & mask];
-
-		if (slot->s == NULL)
-			return;
-		if (slot->s != TOSYA_INDEX_TOMB && slot->dev == dev &&
-		    slot->ino == ino) {
-			WRITE_ONCE(slot->s, TOSYA_INDEX_TOMB);
-			ix->used--;
-			return;
-		}
-	}
+	if (index_insert(ix, dev, ino, s))
+		return true;
+	/* The stash is full: one rebuild gives every key a table sized to what is held. */
+	index_rebuild_locked();
+	ix = g_index;
+	return ix != NULL && index_insert(ix, dev, ino, s);
 }
 
 static int tosya_shadow_open(struct inode *inode, struct file *file)
@@ -319,10 +378,14 @@ static int tosya_shadow_open(struct inode *inode, struct file *file)
 // One table per file, told apart by the numbers a helper can name it by.
 static struct tosya_shadow *shadow_find(u32 dev, u64 ino)
 {
-	u32 i;
+	struct tosya_shadow *s = index_get(dev, ino);
 
-	(void)i;
-	return index_get(dev, ino);
+	/*
+	 * A parked record is one whose file is gone: the table stays, because an inode may still be
+	 * reading through it, but the name is not taken, so a file that comes back -- even at the
+	 * same inode number -- is given a record of its own.
+	 */
+	return (s != NULL && !s->parked) ? s : NULL;
 }
 
 /*
@@ -408,7 +471,11 @@ __maybe_unused static void shadow_drop_id(u32 dev, u64 ino)
 	 * inode number -- is given a table of its own.
 	 */
 	s->parked = true;
-	index_del(s->dev, s->ino);
+	/*
+	 * The index is not touched: nothing is removed between pushes, and the rebuild at the end
+	 * of the stream is what leaves this record out. Until then it is still found -- which is
+	 * what the paragraph above is about.
+	 */
 }
 
 /*
@@ -525,6 +592,12 @@ u32 tosya_apk_stream_finish(void)
 	tosya_apk_shadow_sweep();
 
 	mutex_lock(&g_shadow_lock);
+	/*
+	 * The one moment the table is rebuilt: what the stream left out is left out here too, so a
+	 * table never carries the history of what it held and the lookup stays two buckets and a
+	 * stash. The table it replaces goes to RCU.
+	 */
+	index_rebuild_locked();
 	for (i = 0; i < g_shadow_n; i++)
 		if (!g_shadow[i]->parked) {
 			left++;
@@ -583,12 +656,18 @@ void tosya_apk_remove(void)
 		g_shadow[i] = NULL;
 	}
 	g_shadow_n = 0;
-	for (i = 0; i < g_index_all_n; i++) {
-		kvfree(g_index_all[i]->slot);
-		kfree(g_index_all[i]);
+	{
+		struct tosya_index *ix = rcu_dereference_protected(
+			g_index, lockdep_is_held(&g_shadow_lock));
+
+		rcu_assign_pointer(g_index, NULL);
+		/* A reader may still be in it: the table goes after the grace period, not before. */
+		synchronize_rcu();
+		if (ix != NULL) {
+			kvfree(ix->slot);
+			kfree(ix);
+		}
 	}
-	g_index_all_n = 0;
-	rcu_assign_pointer(g_index, NULL);
 	mutex_unlock(&g_shadow_lock);
 }
 /* TOSYA_SHADOW_END */

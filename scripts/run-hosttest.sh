@@ -43,7 +43,7 @@ clang -fsanitize=address,undefined -fno-omit-frame-pointer -std=c23 -O1 -g \
   -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
   -Werror=invalid-pp-token -I build -I src/include -I scripts/hosttest -o "$shadow" \
   scripts/shadow_host_test.c
-for mode in early-put no-reuse readd remove; do
+for mode in early-put no-reuse readd remove reads; do
   "$shadow" "$mode"
 done
 
