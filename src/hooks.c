@@ -50,6 +50,8 @@ int hooks_install(void)
 	 */
 	if (tosya_unlock_inode_install())
 		pr_warn("tosya: the inode unlock hook is not in place; names are not shadowed\n");
+	if (tosya_evict_inode_install())
+		pr_warn("tosya: the inode reclaim hook is not in place; records are never given back\n");
 
 	uid = tosya_tier_install(TOSYA_TIER_UID, tosya_uid_tier);
 	tosya_status_set_uid_tier(tosya_tier_name(TOSYA_TIER_UID));

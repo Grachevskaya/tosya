@@ -69,6 +69,12 @@ struct tosya_shadow {
 	 * a record is parked for good, because an inode may still be pointing at its table.
 	 */
 	bool parked;
+	/*
+	 * The inode that carried this record has been reclaimed, so nothing points at it any more and
+	 * the next push takes it out of the array. Until then it is parked like any other.
+	 */
+	bool reclaimed;
+	struct rcu_head rcu;
 };
 
 // cp_new_stat() hands userspace this encoding of s_dev; match it by hand.
@@ -144,19 +150,19 @@ static u32 index_other(u64 h, u32 bits)
 	return (u32)((h * 0x9e3779b97f4a7c15ULL) >> (64 - bits));
 }
 
+/*
+ * One allocation for the table and its slots: the slots are handed to RCU with the table, and a
+ * block that is freed as a whole cannot leave half of itself behind.
+ */
 static struct tosya_index *index_new(u32 bits)
 {
-	struct tosya_index *ix = kzalloc(sizeof(*ix), GFP_KERNEL);
+	size_t slots = (size_t)(1u << bits) * sizeof(struct tosya_index_slot);
+	struct tosya_index *ix = kvzalloc(sizeof(*ix) + slots, GFP_KERNEL);
 
 	if (ix == NULL)
 		return NULL;
-	ix->slot =
-		kvzalloc((size_t)(1u << bits) * sizeof(*ix->slot), GFP_KERNEL);
-	if (ix->slot == NULL) {
-		kfree(ix);
-		return NULL;
-	}
 	ix->bits = bits;
+	ix->slot = (struct tosya_index_slot *)(ix + 1);
 	return ix;
 }
 
@@ -483,6 +489,25 @@ __maybe_unused static void shadow_drop_id(u32 dev, u64 ino)
  * shadow_arm, DEL through shadow_drop_id (parking); the two share code, not meaning.
  */
 /*
+ * The inode that carried a record is being reclaimed. Nothing can reach the record through it any
+ * more, so it is marked for the next push to take out -- not freed here, because a reader may still
+ * be inside the table that points at it.
+ */
+void tosya_apk_shadow_reclaim(struct inode *inode)
+{
+	const struct file_operations *op = READ_ONCE(inode->i_fop);
+	struct tosya_shadow *s;
+
+	if (op == NULL || op->open != tosya_shadow_open)
+		return;
+	s = container_of(op, struct tosya_shadow, fops);
+	mutex_lock(&g_shadow_lock);
+	s->parked = true;
+	s->reclaimed = true;
+	mutex_unlock(&g_shadow_lock);
+}
+
+/*
  * Is this inode one of ours? Called with a newly read inode before it is unlocked, so the file
  * system has finished setting i_fop and nothing can open it yet: replacing it here is the one
  * moment with no window and no race.
@@ -598,6 +623,19 @@ u32 tosya_apk_stream_finish(void)
 	 * stash. The table it replaces goes to RCU.
 	 */
 	index_rebuild_locked();
+	/*
+	 * The records whose inode is gone leave here: the table that pointed at them was just
+	 * replaced, so what is left is the grace period, and it is the same one the old table waits
+	 * for.
+	 */
+	for (i = 0; i < g_shadow_n;) {
+		if (!g_shadow[i]->reclaimed) {
+			i++;
+			continue;
+		}
+		kvfree_rcu(g_shadow[i], rcu);
+		g_shadow[i] = g_shadow[--g_shadow_n];
+	}
 	for (i = 0; i < g_shadow_n; i++)
 		if (!g_shadow[i]->parked) {
 			left++;
@@ -663,10 +701,7 @@ void tosya_apk_remove(void)
 		rcu_assign_pointer(g_index, NULL);
 		/* A reader may still be in it: the table goes after the grace period, not before. */
 		synchronize_rcu();
-		if (ix != NULL) {
-			kvfree(ix->slot);
-			kfree(ix);
-		}
+		kvfree(ix);
 	}
 	mutex_unlock(&g_shadow_lock);
 }

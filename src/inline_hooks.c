@@ -343,6 +343,51 @@ free_region:
  * newly read inode passes here, with its file operations already set by the file system and not
  * yet unlocked, so the swap is made before anything can open it.
  */
+extern u32 g_evict_inode_copy[];
+extern void tosya_evict_inode_orig(struct inode *inode);
+extern void tosya_evict_inode_stub(struct inode *inode);
+extern void tosya_evict_inode_pacia_stub(struct inode *inode);
+extern void tosya_evict_inode_pacib_stub(struct inode *inode);
+void tosya_evict_inode_hook(struct inode *inode);
+
+/*
+ * The inode is being reclaimed. Its i_fop is one of the fields the file system is about to take
+ * apart, so the record it carries is marked before the original runs, not after.
+ */
+asm(".pushsection \".text.tosya_inline\",\"ax\"\n" TOSYA_ASM_COPY(
+	"g_evict_inode_copy",
+	"tosya_evict_inode_orig") TOSYA_ASM_STUB("tosya_evict_inode_stub", "",
+						 "tosya_evict_inode_hook")
+	    TOSYA_ASM_STUB("tosya_evict_inode_pacia_stub", "\tautiasp\n",
+			   "tosya_evict_inode_hook")
+		    TOSYA_ASM_STUB("tosya_evict_inode_pacib_stub",
+				   "\tautibsp\n",
+				   "tosya_evict_inode_hook") "\n.popsection\n");
+
+static struct tosya_inline_hook g_evict_inode = {
+	.name = "evict_inode",
+	.copy = g_evict_inode_copy,
+	.hook = (unsigned long)tosya_evict_inode_hook,
+	.stub = (unsigned long)tosya_evict_inode_stub,
+	.pacia_stub = (unsigned long)tosya_evict_inode_pacia_stub,
+	.pacib_stub = (unsigned long)tosya_evict_inode_pacib_stub,
+};
+
+noinline void tosya_evict_inode_hook(struct inode *inode)
+{
+	tosya_apk_shadow_reclaim(inode);
+	tosya_evict_inode_orig(inode);
+}
+
+int tosya_evict_inode_install(void)
+{
+	int rc = inline_install(&g_evict_inode);
+
+	if (rc == 0)
+		pr_info("tosya: a reclaimed inode gives its record back\n");
+	return rc;
+}
+
 extern u32 g_unlock_inode_copy[];
 extern void tosya_unlock_inode_orig(struct inode *inode);
 extern void tosya_unlock_inode_stub(struct inode *inode);

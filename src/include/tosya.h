@@ -8,7 +8,7 @@
 #include <linux/types.h>
 #include <linux/uidgid.h>
 
-/* The bytes a token in memory is made of: everything a package name may hold, and nothing else. */
+// The bytes a token in memory is made of: everything a package name may hold, and nothing else.
 static inline bool tosya_name_char(u8 c)
 {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
@@ -172,13 +172,14 @@ u32 policy_lookup_as(uid_t caller, uid_t target);
  * returns how many stayed.
  */
 struct inode;
-/* Matching a token costs its length, not the size of the list. Returns the matched length. */
-/* cp_new_stat()'s encoding, shared by everything that names a file by its numbers. */
+// Matching a token costs its length, not the size of the list. Returns the matched length.
+// cp_new_stat()'s encoding, shared by everything that names a file by its numbers.
 u32 tosya_encode_dev(dev_t s_dev);
 
-/* The sockets whose holder is the task that starts apps, given at runtime. */
+// The sockets whose holder is the task that starts apps, given at runtime.
 
 bool tosya_apk_shadow_apply(struct inode *inode);
+void tosya_apk_shadow_reclaim(struct inode *inode);
 void tosya_apk_shadow_sweep(void);
 int tosya_apk_stream(u32 op, u32 uid, u32 dev, u64 ino, const char *path,
 		     u32 bytes);
@@ -320,6 +321,7 @@ void tosya_status_set_apks(unsigned int inodes, unsigned int expected,
 void tosya_status_note(int error);
 
 int tosya_unlock_inode_install(void);
+int tosya_evict_inode_install(void);
 
 int policy_init(void);
 void policy_free(void);

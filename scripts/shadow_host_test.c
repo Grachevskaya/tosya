@@ -408,11 +408,41 @@ static void scenario_reads(void)
 		first);
 }
 
+/*
+ * A record whose inode is gone is given back at the next push: the inode cache reclaimed it, so
+ * nothing can reach the record through it, and the array it lives in stops growing with the
+ * churn of installs and removals.
+ */
+static void scenario_reclaim(void)
+{
+	setup_a(1);
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
+	tosya_apk_shadow_apply(g_a);
+	assert(g_shadow_n == 1);
+
+	/* The inode cache gives the inode up: the hook marks the record before the original runs. */
+	tosya_apk_shadow_reclaim(g_a);
+	assert(g_shadow[0]->reclaimed);
+	assert(shadow_find(tosya_encode_dev(g_sb.s_dev), 100) == NULL);
+
+	assert(tosya_apk_stream_finish() == 0);
+	assert(g_shadow_n == 0);
+	assert(index_get(tosya_encode_dev(g_sb.s_dev), 100) == NULL);
+
+	/* The file coming back is a new inode and a new record, not the freed one. */
+	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
+	assert(g_shadow_n == 1);
+	assert(!g_shadow[0]->reclaimed);
+	tosya_apk_remove();
+	assert(g_shadow_n == 0);
+	fprintf(stderr, "shadow: reclaim PASS\n");
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
 		fprintf(stderr,
-			"usage: %s <early-put|no-reuse|readd|remove|reads>\n",
+			"usage: %s <early-put|no-reuse|readd|remove|reads|reclaim>\n",
 			argv[0]);
 		return 2;
 	}
@@ -426,6 +456,8 @@ int main(int argc, char **argv)
 		scenario_remove();
 	else if (!strcmp(argv[1], "reads"))
 		scenario_reads();
+	else if (!strcmp(argv[1], "reclaim"))
+		scenario_reclaim();
 	else
 		return 2;
 	printf("shadow: %s PASS\n", argv[1]);
