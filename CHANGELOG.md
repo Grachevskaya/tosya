@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.6.0
+
+- The family speaks version 6, and the name both halves work out travels with the state they already
+  carry: a record ends with four little-endian words, and `KAUX_KIND_TOKEN` is the stream that puts
+  them there. The name is put into words the same way on both sides, and a name the kernel refuses
+  says why. `KAUX_KIND_MAX` follows, so a userspace half that still speaks 5 is refused in the open
+  rather than read as something else.
+
+- The apk side is one immutable snapshot the sweep reads, indexed by (dev, ino) at the inode cache
+  and matched through a tree, and only in argument shape. A record the index refuses is taken back
+  out rather than left named-but-unmatched, the inode unlock hook reports whether it installed, and
+  the parking bound says what it is: records ever installed, not live ones.
+
+- The fork scrub is gone, with the two scripts that only covered it and the part of the policy that
+  existed for it. Hiding hand-named mappings was tried and taken back out with it. The switch that
+  the comment said turned the apk side off was already on, so neither it nor the host test's copy of
+  it did anything, and `tosya-objs` listed one object twice.
+
+- The state wire says what it owns: a stream says how many of its records were refused, and the
+  ownership of what it carries is settled at the point the stream ends rather than where the record
+  was built.
+
+- The host test keeps the stubs it needs -- lockdep, mm and vmalloc beside the kernel and slab
+  headers it already carried -- and clang-format has had every file it rewrote.
+
 ## 0.5.0
 
 - The rename reaches everything it had left behind: include guards, host-test macros, the compiler
