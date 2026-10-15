@@ -537,27 +537,36 @@ void tosya_apk_shadow_reclaim(struct inode *inode)
  * Is this inode one of ours? Called with a newly read inode before it is unlocked, so the file
  * system has finished setting i_fop and nothing can open it yet: replacing it here is the one
  * moment with no window and no race.
+ *
+ * The caller says whether it is already inside the table lock. The sweep walks the table holding it,
+ * and a task that reaches for a lock it owns waits forever on itself -- which is what a push ending
+ * while the files it names sit in the cache did, the first time that path was ever run.
  */
-bool tosya_apk_shadow_apply(struct inode *inode)
+static bool shadow_apply(struct inode *inode, bool locked)
 {
 	const struct file_operations *cur;
 	struct tosya_shadow *s;
+	u32 dev;
 
 	if (inode == NULL || g_shadow_n == 0)
 		return false;
 	if (!S_ISREG(inode->i_mode))
 		return false;
-	s = index_get(tosya_encode_dev(inode->i_sb->s_dev), inode->i_ino);
+	dev = tosya_encode_dev(inode->i_sb->s_dev);
+	s = index_get(dev, inode->i_ino);
 	if (s == NULL && READ_ONCE(g_staging) != NULL) {
 		/*
 		 * A record this push has armed is not published yet: the table a reader sees only gets
 		 * it when the push ends. The lock is taken for that case alone, so the path every new
 		 * inode walks stays the lockless one.
 		 */
-		mutex_lock(&g_shadow_lock);
-		s = shadow_find_locked(tosya_encode_dev(inode->i_sb->s_dev),
-				       inode->i_ino);
-		mutex_unlock(&g_shadow_lock);
+		if (locked) {
+			s = shadow_find_locked(dev, inode->i_ino);
+		} else {
+			mutex_lock(&g_shadow_lock);
+			s = shadow_find_locked(dev, inode->i_ino);
+			mutex_unlock(&g_shadow_lock);
+		}
 	}
 	if (s == NULL)
 		return false;
@@ -570,6 +579,11 @@ bool tosya_apk_shadow_apply(struct inode *inode)
 		return false; /* another table: never replaced */
 	WRITE_ONCE(inode->i_fop, &s->fops);
 	return true;
+}
+
+bool tosya_apk_shadow_apply(struct inode *inode)
+{
+	return shadow_apply(inode, false);
 }
 
 /*
@@ -613,7 +627,7 @@ void tosya_apk_shadow_sweep(void)
 		inode = ilookup(sb, s->ino);
 		if (inode != NULL) {
 			/* the reference ilookup answered with is ours to give back */
-			tosya_apk_shadow_apply(inode);
+			shadow_apply(inode, true);
 			iput(inode);
 		}
 		drop_super(sb);

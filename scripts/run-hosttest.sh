@@ -43,8 +43,10 @@ clang -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -std=c23 -O1
   -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
   -Werror=invalid-pp-token -I build -I src/include -I scripts/hosttest -o "$shadow" \
   scripts/shadow_host_test.c
-for mode in early-put no-reuse readd remove reads reclaim contend; do
-  "$shadow" "$mode"
+# A timeout is part of the harness: a lock taken twice used to hang here instead of failing, and a
+# hang is the one result nobody reads.
+for mode in early-put no-reuse readd remove reads reclaim sweep-cached contend; do
+  timeout 120 "$shadow" "$mode"
 done
 
 # The same block under the thread sanitizer: six readers and a writer run at once there, and what
@@ -55,7 +57,7 @@ clang -fsanitize=thread -fno-omit-frame-pointer -pthread -std=c23 -O1 -g \
   -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
   -Werror=invalid-pp-token -I build -I src/include -I scripts/hosttest -o "$tsan" \
   scripts/shadow_host_test.c
-TSAN_OPTIONS="suppressions=$PWD/scripts/tsan.supp" "$tsan" contend
+TSAN_OPTIONS="suppressions=$PWD/scripts/tsan.supp" timeout 600 "$tsan" contend
 
 # Every host test again under the address and undefined sanitizers, not only the block written for
 # them: the same source built this way checks a different set of things, and a fault that only shows

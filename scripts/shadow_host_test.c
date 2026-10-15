@@ -10,6 +10,7 @@
  */
 #define _GNU_SOURCE
 #include <assert.h>
+#include <pthread.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -34,8 +35,31 @@ typedef uint64_t u64;
 #define __maybe_unused
 #define __nocfi
 #define DEFINE_MUTEX(x) int x
-#define mutex_lock(x) ((void)(x))
-#define mutex_unlock(x) ((void)(x))
+/*
+ * The table lock is real here, and it says so when one thread takes it twice: the kernel's mutex
+ * would wait forever in that case, and a test that hangs says nothing at all. A stub that ignored
+ * the lock is what let the sweep take it while it already held it.
+ */
+static pthread_mutex_t g_host_lock = PTHREAD_MUTEX_INITIALIZER;
+static _Thread_local int g_host_locked;
+static void host_mutex_lock(int *lock)
+{
+	(void)lock;
+	if (g_host_locked) {
+		fputs("shadow: one thread took the table lock twice\n", stderr);
+		abort();
+	}
+	assert(pthread_mutex_lock(&g_host_lock) == 0);
+	g_host_locked = 1;
+}
+static void host_mutex_unlock(int *lock)
+{
+	(void)lock;
+	g_host_locked = 0;
+	assert(pthread_mutex_unlock(&g_host_lock) == 0);
+}
+#define mutex_lock(x) host_mutex_lock(x)
+#define mutex_unlock(x) host_mutex_unlock(x)
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x, v) ((x) = (v))
 #define container_of(ptr, type, member) \
@@ -468,6 +492,25 @@ static void *reader_thread(void *arg)
 	return NULL;
 }
 
+/*
+ * A push that ends while the files it names are in the cache. The sweep finds their inodes and arms
+ * them, and it does that holding the table lock, so the lookup inside it must not reach for the lock
+ * again. Nothing has been published yet, which is the state the first push ends in.
+ */
+static void scenario_sweep_cached(void)
+{
+	u32 dev = tosya_encode_dev(g_sb.s_dev);
+
+	setup_a(1);
+	assert(shadow_arm(dev, 100, 10123) == 0);
+	assert(g_staging != NULL);
+	assert(tosya_apk_stream_finish() == 1);
+	assert(g_a->i_fop == &g_shadow[0]->fops);
+	assert(open_through(&g_shadow[0]->fops, g_a) == 11);
+	tosya_apk_remove();
+	fprintf(stderr, "shadow: sweep-cached PASS\n");
+}
+
 static void scenario_contend(void)
 {
 	pthread_t th[6];
@@ -502,7 +545,7 @@ int main(int argc, char **argv)
 {
 	if (argc != 2) {
 		fprintf(stderr,
-			"usage: %s <early-put|no-reuse|readd|remove|reads|reclaim|contend>\n",
+			"usage: %s <early-put|no-reuse|readd|remove|reads|reclaim|sweep-cached|contend>\n",
 			argv[0]);
 		return 2;
 	}
@@ -518,6 +561,8 @@ int main(int argc, char **argv)
 		scenario_reads();
 	else if (!strcmp(argv[1], "reclaim"))
 		scenario_reclaim();
+	else if (!strcmp(argv[1], "sweep-cached"))
+		scenario_sweep_cached();
 	else if (!strcmp(argv[1], "contend"))
 		scenario_contend();
 	else
