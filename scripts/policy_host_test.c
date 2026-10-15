@@ -6,10 +6,10 @@
 #include "tag.c" /* the tag record moved out of policy.c; this test covers both */
 #include <stdio.h>
 
-/* the host never logs anything, but the key has to exist for the linker */
+// the host never logs anything, but the key has to exist for the linker
 struct static_key_false tosya_debug_key;
 
-/* the host has no isolated windows to close */
+// the host has no isolated windows to close
 
 static u32 g_fail;
 static u32 t_pairs[400 * 200 * 2];
@@ -177,7 +177,7 @@ int main(void)
 	static u32 pairs[7 * 19 * 2];
 	u32 i, j, w = 0;
 	static u32 big[4000 * 2];
-	/* A policy larger than the 4096-pair ceiling the layout is sized against. */
+	// A policy larger than the 4096-pair ceiling the layout is sized against.
 	static u32 kHugePairs = 24000;
 	static u32 huge[24000 * 2];
 	static u32 hugec[600];
@@ -206,7 +206,7 @@ int main(void)
 			}
 	check_sweep("uid-scale callers", big, bw * 2, bigc, bc, 30000, 30010);
 
-	/* 24000 pairs over 600 callers: every one of them has to come back hidden. */
+	// 24000 pairs over 600 callers: every one of them has to come back hidden.
 	for (i = 0; i < 600; i++)
 		hugec[i] = 10000 + i * 3;
 	for (i = 0, hw = 0; i < kHugePairs; i++) {

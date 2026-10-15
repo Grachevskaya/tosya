@@ -25,7 +25,7 @@ typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
-/* What the block expects from the kernel. */
+// What the block expects from the kernel.
 #define TOSYA_APK_MAX 16
 #define TOSYA_APP_MIN 10000u
 #define TOSYA_APP_SPAN 10000u
@@ -36,11 +36,8 @@ typedef uint64_t u64;
 #define __maybe_unused
 #define __nocfi
 #define DEFINE_MUTEX(x) int x
-/*
- * The table lock is real here, and it says so when one thread takes it twice: the kernel's mutex
- * would wait forever in that case, and a test that hangs says nothing at all. A stub that ignored
- * the lock is what let the sweep take it while it already held it.
- */
+// The table lock is real here, and it aborts when one thread takes it twice: the kernel's mutex would
+// wait forever there, and a test that hangs says nothing.
 static pthread_mutex_t g_host_lock = PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local int g_host_locked;
 static void host_mutex_lock(int *lock)
@@ -67,6 +64,7 @@ static void host_mutex_unlock(int *lock)
 	((type *)((char *)(ptr) - offsetof(type, member)))
 #define TOSYA_DEBUG_ON() 0
 #define pr_info(...) ((void)0)
+#define pr_info_once(...) ((void)0)
 #define pr_warn(...) ((void)0)
 #define atomic_read(p) (*(p))
 #define i_size_read(p) 0LL
@@ -239,16 +237,12 @@ static struct inode *new_inode(const struct file_operations *ops,
 	inode->i_sb = &g_sb;
 	inode->i_ino = ino;
 	inode->i_count = count;
-	/* A regular file: the shadow rule only applies to those (S_ISREG is asked of it). */
+	// A regular file: the shadow rule only applies to those (S_ISREG is asked of it).
 	inode->i_mode = 0100644;
 	return inode;
 }
 
-/* held = how many references the file has besides the one the lookup takes. */
-/* The module side of this test, declared before the block that defines it is included. */
-void tosya_apk_remove(void);
-
-/* The module side of this test, declared before the block that defines it is included. */
+// held = how many references the file has besides the one the lookup takes.
 void tosya_apk_remove(void);
 
 static void setup_a(int held)
@@ -306,7 +300,7 @@ static void drop_super(struct super_block *sb)
 
 #include "shadow_block.inc"
 
-/* What the kernel's user_get_super does for this build's single super block. */
+// What the kernel's user_get_super does for this build's single super block.
 static struct super_block *host_user_get_super(dev_t dev, bool rw)
 {
 	(void)rw;
@@ -326,7 +320,7 @@ void tosya_tag_name(u32 app)
 	(void)app;
 }
 
-/* A file opened through a table, the way VFS does it. */
+// A file opened through a table.
 static int open_through(const struct file_operations *fops, struct inode *inode)
 {
 	struct file file = { .f_op = fops };
@@ -342,7 +336,7 @@ static void scenario_early_put(void)
 {
 	setup_a(0);
 	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
-	/* The table is built when the rule first meets the file, which is what the inode hook does. */
+	// The table is built when the rule first meets the file, which is what the inode hook does.
 	tosya_apk_shadow_apply(g_a);
 	assert(g_shadow_n == 1);
 	assert(!g_shadow[0]->parked);
@@ -372,7 +366,7 @@ static void scenario_no_reuse(void)
 	assert(g_shadow[1]->ino == 200);
 	assert(open_through(&g_shadow[1]->fops, g_b) == 22);
 
-	/* the old file still finds the operations it was made for */
+	// The first file still finds the operations it was made for.
 	assert(g_shadow[0]->orig_open == open_a);
 	assert(open_through(&g_shadow[0]->fops, g_a) == 11);
 	assert(g_shadow[0]->fops.read_iter(NULL) == 111);
@@ -398,7 +392,7 @@ static void scenario_readd(void)
 	assert(open_through(&g_shadow[1]->fops, g_a) == 11);
 }
 
-/* Unloading puts every file back and gives the records away. */
+// Unloading puts every file back and gives the records away.
 static void scenario_remove(void)
 {
 	setup_a(1);
@@ -411,10 +405,8 @@ static void scenario_remove(void)
 }
 
 /*
- * A lookup costs the same whatever it finds -- a hit and a miss read the two buckets a key can be
- * in -- and what it costs is two slot reads. The number is the design and not a measurement, so
- * it is asserted rather than described: a lookup that read more would be paying for room the
- * writer did not make.
+ * A lookup costs the same whatever it finds: two bucket reads. The number is the design and not a
+ * measurement, so it is asserted rather than described.
  */
 static void scenario_reads(void)
 {
@@ -461,7 +453,7 @@ static void scenario_reclaim(void)
 	tosya_apk_shadow_apply(g_a);
 	assert(g_shadow_n == 1);
 
-	/* The inode cache gives the inode up: the hook marks the record before the original runs. */
+	// The inode cache gives the inode up: the hook marks the record before the original runs.
 	tosya_apk_shadow_reclaim(g_a);
 	assert(g_shadow[0]->reclaimed);
 	assert(shadow_find(tosya_encode_dev(g_sb.s_dev), 100) == NULL);
@@ -470,7 +462,7 @@ static void scenario_reclaim(void)
 	assert(g_shadow_n == 0);
 	assert(index_get(tosya_encode_dev(g_sb.s_dev), 100) == NULL);
 
-	/* The file coming back is a new inode and a new record, not the freed one. */
+	// The file coming back is a new inode and a new record, not the freed one.
 	assert(shadow_arm(tosya_encode_dev(g_sb.s_dev), 100, 10123) == 0);
 	assert(g_shadow_n == 1);
 	assert(!g_shadow[0]->reclaimed);
@@ -496,9 +488,8 @@ static void *reader_thread(void *arg)
 }
 
 /*
- * A push that ends while the files it names are in the cache. The sweep finds their inodes and arms
- * them, and it does that holding the table lock, so the lookup inside it must not reach for the lock
- * again. Nothing has been published yet, which is the state the first push ends in.
+ * A push that ends while the files it names are in the cache: the sweep arms them holding the table
+ * lock, so the lookup inside it must not take that lock again.
  */
 static void scenario_sweep_cached(void)
 {
@@ -515,9 +506,8 @@ static void scenario_sweep_cached(void)
 }
 
 /*
- * What a lookup costs, hit and miss alike, in the one place it can be timed at all. The scenario
- * next door counts the reads, which is the part that does not depend on the machine; this one is the
- * number a person can read, and it is measured in batches so the clock is not part of the answer.
+ * What a lookup costs, hit and miss alike: the scenario next door counts the reads, and this one is
+ * the number, measured in batches so the clock is not part of it.
  */
 #define BENCH_ROUNDS 200
 #define BENCH_PER_ROUND 2000
@@ -525,8 +515,8 @@ static void scenario_sweep_cached(void)
 
 /*
  * Picoseconds per iteration, best of five rounds of two thousand: the clock is outside the loop and
- * the best round is the one least disturbed. Each body is passed in, so the call the benchmark would
- * otherwise add is not part of the answer.
+ * each body is passed in, so no call of the benchmark's own is part of the answer. The loop carries
+ * a compiler barrier, without which the work is hoisted out of a loop that writes nothing it reads.
  */
 #define BENCH_PS(body)                                                                                      \
 	do {                                                                                                \
@@ -551,7 +541,7 @@ static void scenario_sweep_cached(void)
 		ret = total * 1000ull / (BENCH_ROUNDS * BENCH_PER_ROUND);                                   \
 	} while (0)
 
-/* Nothing at all: the loop, so the rest can be read against it. */
+// Nothing at all: the loop, so the rest can be read against it.
 static u64 bench_loop(void)
 {
 	u64 ret;
@@ -560,7 +550,7 @@ static u64 bench_loop(void)
 	return ret;
 }
 
-/* What this machine spends on the harness itself: the read side here is a pthread lock. */
+// What this machine spends on the harness itself: the read side here is a pthread lock.
 static u64 bench_rcu(void)
 {
 	u64 ret;
@@ -569,7 +559,7 @@ static u64 bench_rcu(void)
 	return ret;
 }
 
-/* The table alone: two slot reads and the hash, with no read side and no call around it. */
+// The table alone: two slot reads and the hash, with no read side and no call around it.
 static u64 bench_table(u32 dev, u64 ino)
 {
 	u64 ret;
@@ -578,7 +568,7 @@ static u64 bench_table(u32 dev, u64 ino)
 	return ret;
 }
 
-/* What a caller of the block pays, read side included. */
+// What a caller of the block pays, read side included.
 static u64 bench_find(u32 dev, u64 ino)
 {
 	u64 ret;
@@ -594,7 +584,7 @@ static void scenario_timing(void)
 
 	setup_a(1);
 	assert(shadow_arm(dev, 100, 10123) == 0);
-	/* Published, which is the state a lookup is asked in almost every time. */
+	// Published, which is the state a lookup is asked in almost every time.
 	(void)tosya_apk_stream_finish();
 	loop = bench_loop();
 	rcu = bench_rcu();

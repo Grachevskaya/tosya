@@ -190,7 +190,7 @@ int main(void)
 {
 	tosya_tier_set_table(g_table, ARRAY_SIZE(g_table));
 
-	/* 1. The lowest order that installs wins, after the ones before it failed. */
+	// 1. The lowest order that installs wins, after the ones before it failed.
 	reset_fakes();
 	g_fa.rc = -ENOENT;
 	g_fb.rc = -EINVAL;
@@ -200,7 +200,7 @@ int main(void)
 	want_log("abc");
 	end_case("order");
 
-	/* 2. A family install never touches another family's mechanisms. */
+	// 2. A family install never touches another family's mechanisms.
 	reset_fakes();
 	want(tosya_tier_install(TOSYA_TIER_UID, NULL) == 0, "install uid");
 	want(tosya_tier_install(TOSYA_TIER_SETUID, NULL) == 0,
@@ -265,7 +265,7 @@ int main(void)
 	want_log("");
 	end_case("revert-all");
 
-	/* 8. A family nobody answers stays unanswered and says so. */
+	// 8. A family nobody answers stays unanswered and says so.
 	reset_fakes();
 	want(tosya_tier_install("nope", NULL) != 0, "unknown family refused");
 	want_log("");

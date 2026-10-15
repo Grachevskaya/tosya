@@ -33,7 +33,7 @@ static void check(int ok, const char *what)
 	}
 }
 
-/* Decode the relocated ADRP+ADD pairs and direct calls at their new PCs. */
+// Decode the relocated ADRP+ADD pairs and direct calls at their new PCs.
 static int holds_const(const unsigned char *code, size_t len, unsigned int reg,
 		       unsigned long value)
 {
@@ -137,7 +137,7 @@ static void trampoline_tests(void)
 		{ 0xd503245f, 0x51000448, 4 }, /* BTI c; SUB */
 		{ 0xd50324df, 0xd503233f, 4 }, /* BTI jc; PACIASP */
 	};
-	/* At source[2], each PC-relative target below reaches source[1]. */
+	// At source[2], each PC-relative target below reaches source[1].
 	static const unsigned int reentries[] = {
 		0x17ffffff, 0x97ffffff, 0x54ffffe0, /* B, BL, B.eq */
 		0x34ffffe0, 0x3607ffe0, 0x10ffffe0, /* CBZ, TBZ, ADR */
@@ -161,7 +161,7 @@ static void trampoline_tests(void)
 					      FROM_VA, TO_VA, sizeof(source),
 					      entries[i].skip, &written) == 0,
 		      "plain and BTI/PAC entries build a short trampoline");
-		/* This checks PAC instruction preservation, not hardware authentication. */
+		// This checks PAC instruction preservation, not hardware authentication.
 		check(written == prefix + 4 && !memcmp(output, source, prefix),
 		      "original-call trampoline replays the complete entry prefix");
 		check((output[branch] & 0xfc000000u) == 0x14000000u &&
@@ -230,7 +230,7 @@ int main(void)
 
 		memcpy(&first, copy, 4);
 		check(first == 0xd503233fu, "the copy starts with paciasp");
-		/* No hole: every word of the copy was written by the relocation. */
+		// No hole: every word of the copy was written by the relocation.
 		{
 			size_t k;
 			int hole = 0;

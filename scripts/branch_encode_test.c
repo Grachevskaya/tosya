@@ -56,7 +56,7 @@ int main(void)
 	    (b & 0x03FFFFFFu) != (bl & 0x03FFFFFFu))
 		printf("FAIL: B and BL must share the offset\n"), fails++;
 
-	/* the two instructions the patcher relies on */
+	// the two instructions the patcher relies on
 	if (arm64_is_bl(0x14000000u) || !arm64_is_bl(0x94000000u))
 		printf("FAIL: bl detection\n"), fails++;
 
