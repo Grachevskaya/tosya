@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/types.h>
 
 typedef uint8_t u8;
@@ -410,9 +411,10 @@ static void scenario_remove(void)
 }
 
 /*
- * A lookup costs the same whatever it finds: a hit, a miss and a key that had to wait in the
- * stash all read the two buckets and every stash slot. The number is what the design is for, so it
- * is asserted rather than described.
+ * A lookup costs the same whatever it finds -- a hit and a miss read the two buckets a key can be
+ * in -- and what it costs is two slot reads. The number is the design and not a measurement, so
+ * it is asserted rather than described: a lookup that read more would be paying for room the
+ * writer did not make.
  */
 static void scenario_reads(void)
 {
@@ -431,6 +433,7 @@ static void scenario_reads(void)
 	g_index_reads = 0;
 	assert(shadow_find(tosya_encode_dev(g_sb.s_dev), 100) != NULL);
 	first = g_index_reads;
+	assert(first == 2);
 	g_index_reads = 0;
 	assert(shadow_find(tosya_encode_dev(g_sb.s_dev), 100) != NULL);
 	again = g_index_reads;
@@ -511,6 +514,108 @@ static void scenario_sweep_cached(void)
 	fprintf(stderr, "shadow: sweep-cached PASS\n");
 }
 
+/*
+ * What a lookup costs, hit and miss alike, in the one place it can be timed at all. The scenario
+ * next door counts the reads, which is the part that does not depend on the machine; this one is the
+ * number a person can read, and it is measured in batches so the clock is not part of the answer.
+ */
+#define BENCH_ROUNDS 200
+#define BENCH_PER_ROUND 2000
+#define BENCH_REPS 5
+
+/*
+ * Picoseconds per iteration, best of five rounds of two thousand: the clock is outside the loop and
+ * the best round is the one least disturbed. Each body is passed in, so the call the benchmark would
+ * otherwise add is not part of the answer.
+ */
+#define BENCH_PS(body)                                                                                      \
+	do {                                                                                                \
+		struct timespec a, b;                                                                       \
+		u64 total = 0;                                                                              \
+		int r, i;                                                                                   \
+		volatile int sink = 0;                                                                      \
+                                                                                                            \
+		for (r = 0; r < BENCH_ROUNDS; r++) {                                                        \
+			clock_gettime(CLOCK_MONOTONIC, &a);                                                 \
+			for (i = 0; i < BENCH_PER_ROUND; i++) {                                             \
+				/* The loop has to do the work every time: without this the compiler hoists
+				 * a lookup that only reads what the loop never writes. */ \
+				__asm__ __volatile__("" ::: "memory");                                      \
+				body;                                                                       \
+			}                                                                                   \
+			clock_gettime(CLOCK_MONOTONIC, &b);                                                 \
+			total += (u64)(b.tv_sec - a.tv_sec) * 1000000000ull +                               \
+				 (u64)(b.tv_nsec - a.tv_nsec);                                              \
+		}                                                                                           \
+		(void)sink;                                                                                 \
+		ret = total * 1000ull / (BENCH_ROUNDS * BENCH_PER_ROUND);                                   \
+	} while (0)
+
+/* Nothing at all: the loop, so the rest can be read against it. */
+static u64 bench_loop(void)
+{
+	u64 ret;
+
+	BENCH_PS(sink += i & 1);
+	return ret;
+}
+
+/* What this machine spends on the harness itself: the read side here is a pthread lock. */
+static u64 bench_rcu(void)
+{
+	u64 ret;
+
+	BENCH_PS(rcu_read_lock(); rcu_read_unlock());
+	return ret;
+}
+
+/* The table alone: two slot reads and the hash, with no read side and no call around it. */
+static u64 bench_table(u32 dev, u64 ino)
+{
+	u64 ret;
+
+	BENCH_PS(sink += index_lookup(g_index, dev, ino) != NULL);
+	return ret;
+}
+
+/* What a caller of the block pays, read side included. */
+static u64 bench_find(u32 dev, u64 ino)
+{
+	u64 ret;
+
+	BENCH_PS(sink += shadow_find(dev, ino) != NULL);
+	return ret;
+}
+
+static void scenario_timing(void)
+{
+	u32 dev = tosya_encode_dev(g_sb.s_dev);
+	u64 loop, rcu, hit, miss, find_hit, find_miss;
+
+	setup_a(1);
+	assert(shadow_arm(dev, 100, 10123) == 0);
+	/* Published, which is the state a lookup is asked in almost every time. */
+	(void)tosya_apk_stream_finish();
+	loop = bench_loop();
+	rcu = bench_rcu();
+	hit = bench_table(dev, 100);
+	miss = bench_table(dev, 999999);
+	find_hit = bench_find(dev, 100);
+	find_miss = bench_find(dev, 999999);
+	fprintf(stderr,
+		"shadow: %llu ps loop, %llu ps rcu, table %llu/%llu ps hit/miss, find %llu/%llu",
+		(unsigned long long)loop, (unsigned long long)rcu,
+		(unsigned long long)hit, (unsigned long long)miss,
+		(unsigned long long)find_hit, (unsigned long long)find_miss);
+	puts("");
+	fprintf(stderr,
+		"shadow: the table is %lld ps a lookup, the two differ by %lld ps",
+		(long long)(hit - loop), (long long)hit - (long long)miss);
+	puts("");
+	tosya_apk_remove();
+	puts("shadow: timing PASS");
+}
+
 static void scenario_contend(void)
 {
 	pthread_t th[6];
@@ -545,7 +650,7 @@ int main(int argc, char **argv)
 {
 	if (argc != 2) {
 		fprintf(stderr,
-			"usage: %s <early-put|no-reuse|readd|remove|reads|reclaim|sweep-cached|contend>\n",
+			"usage: %s <early-put|no-reuse|readd|remove|reads|reclaim|sweep-cached|timing|contend>\n",
 			argv[0]);
 		return 2;
 	}
@@ -563,6 +668,8 @@ int main(int argc, char **argv)
 		scenario_reclaim();
 	else if (!strcmp(argv[1], "sweep-cached"))
 		scenario_sweep_cached();
+	else if (!strcmp(argv[1], "timing"))
+		scenario_timing();
 	else if (!strcmp(argv[1], "contend"))
 		scenario_contend();
 	else

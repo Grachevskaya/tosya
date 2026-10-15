@@ -41,11 +41,11 @@ python3 scripts/extract_shadow.py
 shadow=build/shadow_test
 clang -fsanitize=address,undefined -fno-omit-frame-pointer -pthread -std=c23 -O1 -g \
   -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
-  -Werror=invalid-pp-token -I build -I src/include -I scripts/hosttest -o "$shadow" \
+  -DTOSYA_SHADOW_TEST -Werror=invalid-pp-token -I build -I src/include -I scripts/hosttest -o "$shadow" \
   scripts/shadow_host_test.c
 # A timeout is part of the harness: a lock taken twice used to hang here instead of failing, and a
 # hang is the one result nobody reads.
-for mode in early-put no-reuse readd remove reads reclaim sweep-cached contend; do
+for mode in early-put no-reuse readd remove reads reclaim sweep-cached timing contend; do
   timeout 120 "$shadow" "$mode"
 done
 
@@ -55,7 +55,7 @@ done
 tsan=build/shadow_tsan
 clang -fsanitize=thread -fno-omit-frame-pointer -pthread -std=c23 -O1 -g \
   -Wall -Wextra -Wno-unused-parameter -Wno-unused-but-set-variable \
-  -Werror=invalid-pp-token -I build -I src/include -I scripts/hosttest -o "$tsan" \
+-DTOSYA_SHADOW_TEST   -Werror=invalid-pp-token -I build -I src/include -I scripts/hosttest -o "$tsan" \
   scripts/shadow_host_test.c
 TSAN_OPTIONS="suppressions=$PWD/scripts/tsan.supp" timeout 600 "$tsan" contend
 

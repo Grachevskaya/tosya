@@ -92,10 +92,11 @@ static u32 g_shadow_n;
 static DEFINE_MUTEX(g_shadow_lock);
 /*
  * The index the hot paths use: inode creation asks "is this one of ours" for every new inode, so
- * the answer costs the same for a hit and for a miss -- two bucket reads and a scan of the whole
- * stash, which is a fixed four slots. A key has two candidate buckets; an insert that finds both
- * taken moves one of their occupants to its own other bucket, for a bounded number of rounds, and a
- * key that will not settle waits in the stash.
+ * the answer costs the same for a hit and for a miss -- and what it costs is two slot reads, the two
+ * buckets a key can be in, because those are the only two places it can be. Room is the writer's
+ * problem and never the reader's: an insert that finds both buckets taken moves an occupant to its
+ * own other bucket for a bounded number of rounds, and one that still will not settle means this
+ * table was too small, so the build that places it starts again one bit wider.
  *
  * Nothing is marked and nothing is removed between pushes: a stream ends with a rebuild that keeps
  * only the records still live, so a table never carries the history of what it held, and the table
@@ -104,7 +105,6 @@ static DEFINE_MUTEX(g_shadow_lock);
 #define TOSYA_INDEX_MIN_BITS 12u
 #define TOSYA_INDEX_MAX_BITS 21u
 #define TOSYA_INDEX_ROUNDS 8u
-#define TOSYA_INDEX_STASH 4u
 
 struct tosya_index_slot {
 	u32 dev;
@@ -122,8 +122,6 @@ struct tosya_index {
 	u32 bits;
 	u32 used;
 	struct tosya_index_slot *slot;
-	u32 stash_n;
-	struct tosya_index_slot stash[TOSYA_INDEX_STASH];
 	struct rcu_head rcu;
 };
 
@@ -136,8 +134,19 @@ static struct tosya_index __rcu *g_index;
 static struct tosya_index *g_staging;
 
 /* How many slot reads one lookup costs, so a test can hold every lookup to one number. */
+#ifdef TOSYA_SHADOW_TEST
+/* How many slot reads one lookup costs, so the host test can hold every lookup to one number. */
 static unsigned long g_index_reads;
 #define INDEX_READ() (g_index_reads++)
+#else
+/*
+ * Nothing is counted in the module: a store here would be a store on the path every new inode
+ * walks, and it would be the same line on every cpu.
+ */
+#define INDEX_READ() \
+	do {         \
+	} while (0)
+#endif
 
 static u64 index_hash(u64 dev, u64 ino)
 {
@@ -178,8 +187,8 @@ static void index_rebuild_locked(void);
 static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s);
 
 /*
- * One lookup: the two buckets the key can be in, then every stash slot. Nothing returns early,
- * because the cost is what this table is for -- a hit and a miss have to be the same read.
+ * One lookup: the two buckets the key can be in, and nothing else. Nothing returns early, because
+ * the cost is what this table is for -- a hit and a miss have to cost the same two reads.
  */
 static struct tosya_shadow *index_lookup(struct tosya_index *ix, u32 dev,
 					 u64 ino)
@@ -188,7 +197,6 @@ static struct tosya_shadow *index_lookup(struct tosya_index *ix, u32 dev,
 	u32 b1 = index_bucket(h, ix->bits);
 	u32 b2 = index_other(h, ix->bits);
 	struct tosya_shadow *found = NULL;
-	u32 i;
 
 	if (b2 == b1)
 		b2 = b1 ^ 1u;
@@ -200,35 +208,14 @@ static struct tosya_shadow *index_lookup(struct tosya_index *ix, u32 dev,
 	if (ix->slot[b2].s != NULL && ix->slot[b2].dev == dev &&
 	    ix->slot[b2].ino == ino)
 		found = ix->slot[b2].s;
-	for (i = 0; i < TOSYA_INDEX_STASH; i++) {
-		INDEX_READ();
-		if (ix->stash[i].s != NULL && ix->stash[i].dev == dev &&
-		    ix->stash[i].ino == ino)
-			found = ix->stash[i].s;
-	}
 	return found;
-}
-
-static bool index_stash_put(struct tosya_index *ix, u32 dev, u64 ino,
-			    struct tosya_shadow *s)
-{
-	u32 i;
-
-	for (i = 0; i < TOSYA_INDEX_STASH; i++)
-		if (ix->stash[i].s == NULL) {
-			ix->stash[i].dev = dev;
-			ix->stash[i].ino = ino;
-			WRITE_ONCE(ix->stash[i].s, s);
-			ix->stash_n++;
-			return true;
-		}
-	return false;
 }
 
 /*
  * Places one key. Both buckets taken means one occupant moves to its own other bucket, for a
- * bounded number of rounds; a key that will not settle waits in the stash, and a stash that is
- * full is the caller's signal to rebuild.
+ * bounded number of rounds. False means the key those rounds were carrying found no home, which is
+ * this table being too small and not a record lost: every record is in the array the caller builds
+ * from, so the caller answers by building one bit wider.
  */
 static bool index_insert(struct tosya_index *ix, u32 dev, u64 ino,
 			 struct tosya_shadow *s)
@@ -254,13 +241,6 @@ static bool index_insert(struct tosya_index *ix, u32 dev, u64 ino,
 			return true;
 		}
 	}
-	for (i = 0; i < TOSYA_INDEX_STASH; i++)
-		if (ix->stash[i].s != NULL && ix->stash[i].dev == dev &&
-		    ix->stash[i].ino == ino) {
-			WRITE_ONCE(ix->stash[i].s, s);
-			return true;
-		}
-
 	for (round = 0; round < TOSYA_INDEX_ROUNDS; round++) {
 		b1 = index_bucket(h, ix->bits);
 		b2 = index_other(h, ix->bits);
@@ -286,7 +266,7 @@ static bool index_insert(struct tosya_index *ix, u32 dev, u64 ino,
 		s = cur.s;
 		h = index_hash(dev, ino);
 	}
-	return index_stash_put(ix, dev, ino, s);
+	return false;
 }
 
 /*
@@ -306,16 +286,31 @@ static void index_rebuild_locked(void)
 	bits = TOSYA_INDEX_MIN_BITS;
 	while (bits < TOSYA_INDEX_MAX_BITS && (1u << (bits - 1u)) < live * 2u)
 		bits++;
-	ni = index_new(bits);
-	if (ni == NULL)
+	/*
+	 * One bit wider and the whole build starts again: a key cuckoo placement cannot hold is a key
+	 * this table was too small for, and every record is still in the array to be placed.
+	 */
+	for (ni = NULL; ni == NULL && bits <= TOSYA_INDEX_MAX_BITS; bits++) {
+		bool placed = true;
+
+		ni = index_new(bits);
+		if (ni == NULL)
+			return;
+		for (i = 0; i < g_shadow_n && placed; i++) {
+			if (g_shadow[i]->parked)
+				continue;
+			placed = index_insert(ni, g_shadow[i]->dev,
+					      g_shadow[i]->ino, g_shadow[i]);
+		}
+		if (!placed) {
+			kvfree(ni);
+			ni = NULL;
+		}
+	}
+	if (ni == NULL) {
+		pr_warn_once(
+			"tosya: the apk index has no room for every record\n");
 		return;
-	for (i = 0; i < g_shadow_n; i++) {
-		if (g_shadow[i]->parked)
-			continue;
-		if (!index_insert(ni, g_shadow[i]->dev, g_shadow[i]->ino,
-				  g_shadow[i]))
-			pr_warn_once(
-				"tosya: the apk index stash is full; later apks rely on their buckets\n");
 	}
 	rcu_assign_pointer(g_index, ni);
 	if (old != NULL)
@@ -341,11 +336,51 @@ static struct tosya_shadow *index_get(u32 dev, u64 ino)
 	 * A parked record is one whose file is gone: the table stays, because an inode may still be
 	 * reading through it, but the name is not taken. The test is made here, inside the read
 	 * side, because a record this call returns can be freed the moment it returns.
+	 *
+	 * This is the one line a hit touches that a miss never does, and it cannot be taken out of the
+	 * record: the table a reader sees is never written, so a drop cannot mark its own slot. What it
+	 * costs is one line of the record, which the benchmark above keeps hot and a busy machine will
+	 * not -- so read the equality it reports as the table's, and this as the price of a table that
+	 * never changes under a reader.
 	 */
 	if (found != NULL && READ_ONCE(found->parked))
 		found = NULL;
 	rcu_read_unlock();
 	return found;
+}
+
+/*
+ * The table a push fills, rebuilt one bit wider. What has to fit is what the array holds, and a
+ * parked record is not a name taken, so it is left out. Staging is read only with the lock held, so
+ * the table it replaces goes straight back to the allocator.
+ */
+static bool index_put_wider(void)
+{
+	u32 bits;
+
+	for (bits = g_staging->bits + 1u; bits <= TOSYA_INDEX_MAX_BITS;
+	     bits++) {
+		struct tosya_index *ni = index_new(bits);
+		bool placed = true;
+		u32 i;
+
+		if (ni == NULL)
+			return false;
+		for (i = 0; i < g_shadow_n && placed; i++) {
+			if (g_shadow[i]->parked)
+				continue;
+			placed = index_insert(ni, g_shadow[i]->dev,
+					      g_shadow[i]->ino, g_shadow[i]);
+		}
+		if (placed) {
+			kvfree(g_staging);
+			g_staging = ni;
+			return true;
+		}
+		kvfree(ni);
+	}
+	pr_warn_once("tosya: the apk index has no room for every record\n");
+	return false;
 }
 
 static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s)
@@ -360,10 +395,11 @@ static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s)
 	}
 	if (index_insert(ix, dev, ino, s))
 		return true;
-	/* The stash is full: the push that follows builds a table sized to what is held. */
-	pr_warn_once(
-		"tosya: the apk index stash is full; later apks rely on their buckets\n");
-	return false;
+	/*
+	 * What this push fills had no room left. One bit wider takes every record the array holds,
+	 * this one included, and the caller hears about it only if even that could not hold them.
+	 */
+	return index_put_wider();
 }
 
 static int tosya_shadow_open(struct inode *inode, struct file *file)
@@ -670,8 +706,7 @@ u32 tosya_apk_stream_finish(void)
 	mutex_lock(&g_shadow_lock);
 	/*
 	 * The one moment the table is rebuilt: what the stream left out is left out here too, so a
-	 * table never carries the history of what it held and the lookup stays two buckets and a
-	 * stash. The table it replaces goes to RCU.
+	 * table never carries the history of what it held and the lookup stays two buckets. The table it replaces goes to RCU.
 	 */
 	index_rebuild_locked();
 	/*

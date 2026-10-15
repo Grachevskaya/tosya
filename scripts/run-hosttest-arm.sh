@@ -35,7 +35,7 @@ $cc $flags -DTOSYA_HOST_TEST -I src -I src/include -I scripts/hosttest \
 "$qemu" build/arm_tiers
 
 python3 scripts/extract_shadow.py
-$cc $flags -I build -I src/include -I scripts/hosttest \
+$cc -DTOSYA_SHADOW_TEST $flags -I build -I src/include -I scripts/hosttest \
   -o build/arm_shadow scripts/shadow_host_test.c
 for mode in early-put no-reuse readd remove reads reclaim contend; do
   "$qemu" build/arm_shadow "$mode"
