@@ -92,11 +92,10 @@ static u32 g_shadow_n;
 static DEFINE_MUTEX(g_shadow_lock);
 /*
  * The index the hot paths use: inode creation asks "is this one of ours" for every new inode, so
- * the answer costs the same for a hit and for a miss -- and what it costs is two slot reads, the two
- * buckets a key can be in, because those are the only two places it can be. Room is the writer's
- * problem and never the reader's: an insert that finds both buckets taken moves an occupant to its
- * own other bucket for a bounded number of rounds, and one that still will not settle means this
- * table was too small, so the build that places it starts again one bit wider.
+ * the answer costs the same for a hit and for a miss -- the two buckets a key can be in, and nothing
+ * else, because those are the only two places it can be. An insert that finds both taken moves an
+ * occupant to its own other bucket for a bounded number of rounds; one that still will not settle
+ * means the table was too small, and the build that placed it starts again one bit wider.
  *
  * Nothing is marked and nothing is removed between pushes: a stream ends with a rebuild that keeps
  * only the records still live, so a table never carries the history of what it held, and the table
@@ -133,16 +132,12 @@ struct tosya_index {
 static struct tosya_index __rcu *g_index;
 static struct tosya_index *g_staging;
 
-/* How many slot reads one lookup costs, so a test can hold every lookup to one number. */
+// How many slot reads one lookup costs, so a test can hold every lookup to one number.
 #ifdef TOSYA_SHADOW_TEST
-/* How many slot reads one lookup costs, so the host test can hold every lookup to one number. */
 static unsigned long g_index_reads;
 #define INDEX_READ() (g_index_reads++)
 #else
-/*
- * Nothing is counted in the module: a store here would be a store on the path every new inode
- * walks, and it would be the same line on every cpu.
- */
+// Nothing here: the module would be writing one line on the path every new inode walks.
 #define INDEX_READ() \
 	do {         \
 	} while (0)
@@ -153,13 +148,13 @@ static u64 index_hash(u64 dev, u64 ino)
 	return (u64)dev * 0x9e3779b97f4a7c15ULL ^ (ino + 0x165667b19e3779f9ULL);
 }
 
-/* The first candidate bucket. */
+// The first candidate bucket.
 static u32 index_bucket(u64 h, u32 bits)
 {
 	return (u32)(h >> (64 - bits));
 }
 
-/* The second: the same hash multiplied again, so the two do not move together. */
+// The second: the same hash multiplied again, so the two do not move together.
 static u32 index_other(u64 h, u32 bits)
 {
 	return (u32)((h * 0x9e3779b97f4a7c15ULL) >> (64 - bits));
@@ -187,8 +182,8 @@ static void index_rebuild_locked(void);
 static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s);
 
 /*
- * One lookup: the two buckets the key can be in, and nothing else. Nothing returns early, because
- * the cost is what this table is for -- a hit and a miss have to cost the same two reads.
+ * One lookup: the two buckets the key can be in. Nothing returns early, because the cost is what
+ * this table is for -- a hit and a miss have to take the same two reads.
  */
 static struct tosya_shadow *index_lookup(struct tosya_index *ix, u32 dev,
 					 u64 ino)
@@ -212,10 +207,9 @@ static struct tosya_shadow *index_lookup(struct tosya_index *ix, u32 dev,
 }
 
 /*
- * Places one key. Both buckets taken means one occupant moves to its own other bucket, for a
- * bounded number of rounds. False means the key those rounds were carrying found no home, which is
- * this table being too small and not a record lost: every record is in the array the caller builds
- * from, so the caller answers by building one bit wider.
+ * Places one key. Both buckets taken moves an occupant to its own other bucket for a bounded number
+ * of rounds; false means it could not be placed, which the caller answers by building a wider table
+ * from the records its array holds.
  */
 static bool index_insert(struct tosya_index *ix, u32 dev, u64 ino,
 			 struct tosya_shadow *s)
@@ -286,10 +280,7 @@ static void index_rebuild_locked(void)
 	bits = TOSYA_INDEX_MIN_BITS;
 	while (bits < TOSYA_INDEX_MAX_BITS && (1u << (bits - 1u)) < live * 2u)
 		bits++;
-	/*
-	 * One bit wider and the whole build starts again: a key cuckoo placement cannot hold is a key
-	 * this table was too small for, and every record is still in the array to be placed.
-	 */
+	// A key cuckoo placement cannot hold means the table was too small: start again one bit wider.
 	for (ni = NULL; ni == NULL && bits <= TOSYA_INDEX_MAX_BITS; bits++) {
 		bool placed = true;
 
@@ -336,12 +327,6 @@ static struct tosya_shadow *index_get(u32 dev, u64 ino)
 	 * A parked record is one whose file is gone: the table stays, because an inode may still be
 	 * reading through it, but the name is not taken. The test is made here, inside the read
 	 * side, because a record this call returns can be freed the moment it returns.
-	 *
-	 * This is the one line a hit touches that a miss never does, and it cannot be taken out of the
-	 * record: the table a reader sees is never written, so a drop cannot mark its own slot. What it
-	 * costs is one line of the record, which the benchmark above keeps hot and a busy machine will
-	 * not -- so read the equality it reports as the table's, and this as the price of a table that
-	 * never changes under a reader.
 	 */
 	if (found != NULL && READ_ONCE(found->parked))
 		found = NULL;
@@ -349,11 +334,8 @@ static struct tosya_shadow *index_get(u32 dev, u64 ino)
 	return found;
 }
 
-/*
- * The table a push fills, rebuilt one bit wider. What has to fit is what the array holds, and a
- * parked record is not a name taken, so it is left out. Staging is read only with the lock held, so
- * the table it replaces goes straight back to the allocator.
- */
+// The table a push fills, one bit wider, refilled from the live records the array holds. Staging is
+// read only under the lock, so the table it replaces goes straight back to the allocator.
 static bool index_put_wider(void)
 {
 	u32 bits;
@@ -395,10 +377,7 @@ static bool index_put(u32 dev, u64 ino, struct tosya_shadow *s)
 	}
 	if (index_insert(ix, dev, ino, s))
 		return true;
-	/*
-	 * What this push fills had no room left. One bit wider takes every record the array holds,
-	 * this one included, and the caller hears about it only if even that could not hold them.
-	 */
+	// What this push fills had no room left: grow it and refill from the records the array holds.
 	return index_put_wider();
 }
 
@@ -574,9 +553,8 @@ void tosya_apk_shadow_reclaim(struct inode *inode)
  * system has finished setting i_fop and nothing can open it yet: replacing it here is the one
  * moment with no window and no race.
  *
- * The caller says whether it is already inside the table lock. The sweep walks the table holding it,
- * and a task that reaches for a lock it owns waits forever on itself -- which is what a push ending
- * while the files it names sit in the cache did, the first time that path was ever run.
+ * locked says the caller is already inside the table lock, which the sweep is: a task that reaches
+ * for a lock it owns waits on itself.
  */
 static bool shadow_apply(struct inode *inode, bool locked)
 {
@@ -662,8 +640,20 @@ void tosya_apk_shadow_sweep(void)
 			continue;
 		inode = ilookup(sb, s->ino);
 		if (inode != NULL) {
-			/* the reference ilookup answered with is ours to give back */
-			shadow_apply(inode, true);
+			// The reference ilookup answered with is ours to give back.
+			// An inode already carrying this record's table is the ordinary case, not a refusal.
+			if (!shadow_apply(inode, true) &&
+			    READ_ONCE(inode->i_fop) != &s->fops)
+				pr_info_once(
+					"tosya: sweep could not arm ino %llu: mode %o, fop %s, orig %s\n",
+					(unsigned long long)s->ino,
+					inode->i_mode,
+					READ_ONCE(inode->i_fop) == NULL ?
+						"none" :
+						"set",
+					READ_ONCE(s->orig_fops) == NULL ?
+						"none" :
+						"set");
 			iput(inode);
 		}
 		drop_super(sb);
@@ -785,10 +775,10 @@ void tosya_apk_remove(void)
 			g_index, lockdep_is_held(&g_shadow_lock));
 
 		rcu_assign_pointer(g_index, NULL);
-		/* A reader may still be in it: the table goes after the grace period, not before. */
+		// A reader may still be in it: the table goes after the grace period, not before.
 		synchronize_rcu();
 		kvfree(ix);
-		/* The side a push fills is not published and nothing reads it: it goes with the lock held. */
+		// The side a push fills is not published and nothing reads it: it goes with the lock held.
 		kvfree(g_staging);
 		g_staging = NULL;
 	}
