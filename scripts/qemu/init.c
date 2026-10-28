@@ -26,6 +26,7 @@
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 
 #define CMD_PING 1
 #define CMD_BEGIN 2
@@ -34,6 +35,7 @@
 #define CMD_STATUS 5
 #define ATTR_BLOB 1
 #define KIND_APKS 1u
+#define KIND_NAMES 5u
 #define OP_ADD 0u
 #define OP_DEL 1u
 #define NFILES 64
@@ -66,7 +68,7 @@ static int send_cmd(int cmd, const void *blob, int len)
 	nlh->nlmsg_seq = 1;
 	gh = (void *)NLMSG_DATA(nlh);
 	gh->cmd = cmd;
-	gh->version = 6;
+	gh->version = 7;
 	if (blob != NULL && len > 0) {
 		struct nlattr *a = (void *)(buf + total);
 		a->nla_type = ATTR_BLOB;
@@ -116,6 +118,64 @@ static int status_read(unsigned int *inodes, unsigned int *offered,
 		}
 	}
 	return -1;
+}
+
+/*
+ * A names stream: the same framing as the apk records, with a record per (caller, name). What the
+ * module keeps is the names a caller may not see; the walk asks it before a name is looked up.
+ */
+static int push_names(const char *const *names, const unsigned int *callers,
+		      int n)
+{
+	char blob[8192];
+	unsigned int count = n;
+	unsigned int kind = KIND_NAMES;
+	char reply[256];
+	int at = 4;
+	int got;
+
+	memcpy(blob, &count, 4);
+	for (int i = 0; i < n; i++) {
+		unsigned int op = OP_ADD;
+		unsigned int len = (unsigned int)strlen(names[i]);
+		unsigned int padded = (len + 3) & ~3u;
+
+		memcpy(blob + at, &op, 4);
+		at += 4;
+		memcpy(blob + at, &callers[i], 4);
+		at += 4;
+		memcpy(blob + at, &len, 4);
+		at += 4;
+		memcpy(blob + at, names[i], len);
+		memset(blob + at + len, 0, padded - len);
+		at += (int)padded;
+	}
+
+	send_cmd(CMD_BEGIN, &kind, 4);
+	got = recv_into(reply, sizeof(reply));
+	if (got > 0 && ((struct nlmsghdr *)reply)->nlmsg_type == NLMSG_ERROR &&
+	    ((struct nlmsgerr *)NLMSG_DATA(reply))->error != 0) {
+		printf("init: names BEGIN refused: %d\n",
+		       ((struct nlmsgerr *)NLMSG_DATA(reply))->error);
+		return -1;
+	}
+	send_cmd(CMD_BATCH, blob, at);
+	got = recv_into(reply, sizeof(reply));
+	if (got > 0 && ((struct nlmsghdr *)reply)->nlmsg_type == NLMSG_ERROR &&
+	    ((struct nlmsgerr *)NLMSG_DATA(reply))->error != 0) {
+		printf("init: names BATCH refused: %d\n",
+		       ((struct nlmsgerr *)NLMSG_DATA(reply))->error);
+		return -1;
+	}
+	send_cmd(CMD_END, NULL, 0);
+	got = recv_into(reply, sizeof(reply));
+	if (got > 0 && ((struct nlmsghdr *)reply)->nlmsg_type == NLMSG_ERROR &&
+	    ((struct nlmsgerr *)NLMSG_DATA(reply))->error != 0) {
+		printf("init: names END refused: %d\n",
+		       ((struct nlmsgerr *)NLMSG_DATA(reply))->error);
+		return -1;
+	}
+	return 0;
 }
 
 static int push_adds(const struct rec *recs, int n, const char *const *paths)
@@ -373,6 +433,24 @@ int main(void)
 		rc = mount("/dev/nvme0n1p1", "/work", "ext4", 0, NULL);
 	printf("init: by-name/userdata on /work: %s\n",
 	       rc ? strerror(errno) : "ok");
+	/*
+	 * The protected parents have to exist before the module is loaded: it looks for them when it
+	 * starts and again when a set arrives, and a parent it never found answers walks itself. They
+	 * live on the disk, not on the initramfs: a negative dentry on ext4 is cached, so a name that is
+	 * not there costs what a name nobody has costs -- which is the comparison this test is for.
+	 */
+	mkdir("/work/data", 0755);
+	mkdir("/work/data/user", 0771);
+	mkdir("/work/data/user/0", 0771);
+	mkdir("/work/data/user/0/com.hidden.one", 0700);
+	mkdir("/work/data/user/0/com.hidden.two", 0700);
+	mkdir("/work/data/user/0/com.visible.one", 0700);
+	mkdir("/work/data/user_de", 0771);
+	mkdir("/work/data/user_de/0", 0771);
+	mkdir("/work/data/user_de/0/com.hidden.one", 0700);
+	mkdir("/data", 0755);
+	if (mount("/work/data", "/data", NULL, MS_BIND, NULL) != 0)
+		printf("init: bind /data: %s\n", strerror(errno));
 	load("/tosya.ko");
 
 	g_fd = socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC);
@@ -436,7 +514,7 @@ int main(void)
 		snprintf(names_buf[i], sizeof(names_buf[i]), "f%03d", i);
 		char p[128];
 		snprintf(p, sizeof(p), "/work/%s", names_buf[i]);
-		int fd = open(p, O_CREAT | O_WRONLY, 0600);
+		int fd = open(p, O_CREAT | O_WRONLY, 0644);
 		write(fd, "x", 1);
 		close(fd);
 	}
@@ -492,6 +570,166 @@ int main(void)
 	g_tprev = now_us();
 	printf("init: after push: inodes=%u offered=%u updates=%u\n", inodes,
 	       offered, updates);
+
+	/*
+	 * The directory half. The records above named this process's own apk, and the open loop below
+	 * is what gives it that identity -- so the walk that follows is the one an app makes.
+	 */
+	status_read(&inodes, &offered, &updates);
+	{
+		static const char *const hidden_names[] = { "com.hidden.one" };
+		static const char *const other_names[] = { "com.hidden.two" };
+		struct stat d;
+		unsigned long long t0;
+		int r_hidden, r_visible, r_de, r_other;
+
+		/*
+		 * The names this process may not see, published for the caller the records named
+		 * (uid 10123). A second name is published for a caller this process is not, which is
+		 * the control: the same walk, a different caller, visible.
+		 */
+		/*
+		 * One stream carries the whole set: a second stream's END would replace the first. Both
+		 * names go up together, one per caller.
+		 */
+		{
+			static const char *const both[] = { "com.hidden.one",
+							    "com.hidden.two" };
+			static const unsigned int who[] = { 10000u + 123u,
+							    10000u + 124u };
+
+			r_hidden = push_names(both, who, 2);
+			r_other = r_hidden;
+		}
+
+		/* Without an identity every name is visible: the walk has not been told who is asking. */
+		r_visible = stat("/data/user/0/com.hidden.one", &d);
+		printf("init: before identity hidden-name stat=%d\n",
+		       r_visible);
+
+		/*
+	 * The identity comes from the framework, not from a name: a change of uid marks the task, and the
+	 * first open of a file the records name gives it that app's number. Only then is the walk asked
+	 * a question it can answer for a caller.
+	 */
+		drop_caches();
+		{
+			/*
+		 * A child does the asking: the identity is taken by changing uid and then opening a file the
+		 * records name, and a process that has done that is no longer root -- the parent keeps root
+		 * for the poweroff at the end.
+		 */
+			pid_t kid = fork();
+
+			if (kid == 0) {
+				int fd;
+
+				if (setuid(10000u + 123u) != 0) {
+					printf("init: setuid failed: %s\n",
+					       strerror(errno));
+					_exit(2);
+				}
+				fd = open("/work/f000", O_RDONLY);
+				if (fd >= 0)
+					close(fd);
+
+				r_hidden =
+					stat("/data/user/0/com.hidden.one", &d);
+				r_visible = stat("/data/user/0/com.visible.one",
+						 &d);
+				r_de = stat("/data/user_de/0/com.hidden.one",
+					    &d);
+				r_other =
+					stat("/data/user/0/com.hidden.two", &d);
+				printf("init: dir hidden=%d(%s) visible=%d de=%d(%s) other-caller=%d\n",
+				       r_hidden,
+				       r_hidden ? strerror(errno) : "visible",
+				       r_visible, r_de,
+				       r_de ? strerror(errno) : "visible",
+				       r_other);
+
+				if (r_hidden == 0 || r_de == 0 ||
+				    r_visible != 0 || r_other != 0) {
+					printf("init: DIR HIDING FAILED hidden=%d de=%d visible=%d other=%d\n",
+					       r_hidden, r_de, r_visible,
+					       r_other);
+					_exit(1);
+				}
+				printf("init: DIR HIDING OK\n");
+
+				/*
+			 * The three answers, interleaved: a batch of one name, then of the next, rotating
+			 * which goes first so the order cannot decide the result. Each round reports its own
+			 * numbers, and the median of the rounds is what the verdict uses.
+			 */
+				{
+					enum { ROUNDS = 21, BATCH = 64 };
+					unsigned long long sum[3] = { 0, 0, 0 };
+					unsigned long long per[3][ROUNDS];
+					static const char *const path3[3] = {
+						"/data/user/0/com.hidden.one",
+						"/data/user/0/com.visible.one",
+						"/data/user/0/com.absent.one",
+					};
+					int r, k, b;
+
+					for (r = 0; r < ROUNDS; r++) {
+						for (k = 0; k < 3; k++) {
+							const int which =
+								(k + r) % 3;
+
+							t0 = now_us();
+							for (b = 0; b < BATCH;
+							     b++)
+								(void)stat(
+									path3[which],
+									&d);
+							per[which][r] =
+								now_us() - t0;
+							sum[which] +=
+								per[which][r];
+						}
+					}
+					for (k = 0; k < 3; k++) {
+						int j, a;
+
+						for (j = 1; j < ROUNDS; j++) {
+							const unsigned long long
+								v = per[k][j];
+
+							for (a = j - 1;
+							     a >= 0 &&
+							     per[k][a] > v;
+							     a--)
+								per[k][a + 1] =
+									per[k]
+									   [a];
+							per[k][a + 1] = v;
+						}
+						printf("init: t_%s median %llu us / %d (mean %llu)\n",
+						       k == 0 ?
+							       "hidden" :
+							       (k == 1 ?
+									"visible" :
+									"absent"),
+						       per[k][ROUNDS / 2],
+						       BATCH,
+						       sum[k] /
+							       (unsigned long long)
+								       ROUNDS);
+					}
+				}
+				_exit(0);
+			}
+			if (kid > 0) {
+				int st = 0;
+
+				waitpid(kid, &st, 0);
+				if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
+					g_fail = 1;
+			}
+		}
+	}
 
 	/* Nothing has opened them since the push, so the records have met no inode yet. Opening is what
 	 * makes one, and that is where the module puts its table on. */
