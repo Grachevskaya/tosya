@@ -10,6 +10,7 @@ inline_hooks.c    find_user / cap_task_fix_setuid hooks, one-instruction entry p
 table_hooks.c     the two mechanisms that rewrite sys_call_table entries, one for the uid
                   queries and one for the id setters, plus that table plumbing itself
 inode_hook.c      the apk side: registered application APKs have ->open replaced
+dir_hook.c        protected data directories: a per-inode i_op copy whose ->lookup hides a name
 lsm.c             the task_fix_setuid LSM fallback, before the credential commit
 inline_entry.c    a short original-call trampoline, returning to the native function body
 inline_alloc.c    private near-island pages, runtime allocation and RW/NX to RO/X sealing
@@ -142,6 +143,46 @@ A slot is patched only when the value in it is one this module resolved: the ent
 jump-table spelling. The number a syscall has is a hint for the first comparison, never the thing
 that decides -- a wrong number would otherwise be a hook on someone else's syscall, which is what a
 32-bit getpriority used to be before this was a comparison.
+
+## Hiding a package's data directories
+
+A hidden package's name is a directory under the trees that name it: `/data/user/<u>/<pkg>`,
+`/data/data/<pkg>` (the same inode as `/data/user/0/<pkg>`), and `/data/user_de/<u>/<pkg>`. The
+parent inodes are resolved at load, on `KAUX_CMD_REFRESH`, and at the end of every names stream -- a
+module loaded before `/data` was complete registered only what existed then, which is why the refresh
+sits in the set's path. Each parent gets a private copy of its `inode_operations` with only
+`->lookup` replaced; the shared const table is never written, and an inode that is not a protected
+parent keeps the table it had.
+
+The question the walk asks is about one dentry name, and the answer depends on who is asking, while
+the dcache is shared. So the answer is decided before the dcache is consulted: one inline hook on
+`lookup_fast(struct nameidata *)` reads the caller's app id from the birth tag, probes the published
+set a fixed number of pair slots -- the same run for every name, the caller's own slots and the
+wildcard's -- and then, with conditional selects and no branch on the answer, puts the entry's stored
+mask bytes and the hash the set published in place of the asked name, or leaves both alone. Nothing is
+allocated, no lock is taken, and the mask is not built in the walk: it is generated once when the set is
+published, keeps the length of the name it stands for, and is kept beside the name in the arena.
+
+A name hidden from somebody is then looked up, cached, and answered as a name nobody has: the
+filesystem is asked about the mask, finds nothing, and leaves the negative entry it leaves for any absent
+name, so the second walk is answered from the cache. That is the point of the mask: the hidden name and
+the absent name take the same path through the kernel and cost the caller the same. When the entry a
+lookup is about is already a stored mask, the replaced `->lookup` hashes it and returns without asking
+the filesystem at all; that branch exists for a walk that reached the slow path before the fast one could
+answer.
+
+Names are sent by `KAUX_KIND_NAMES`: a complete set of `ADD` records keyed by the caller's app uid,
+replaced whole at END. The published set is never written after it is handed over; a replacement is built
+on the side and published with one store, and the set it replaces is kept, not freed, because a walk that
+is past the fast hook can still hold a pointer into its mask bytes. The read side of `g_dir_sem` spans
+one lookup and the write side spans a set change, so a lookup never sees a set that is half applied.
+
+Two limits are worth stating. `inode_operations` has no owner the VFS could take a reference on, so the
+first protected parent pins the module and an armed module does not unload (it is already removed from the
+module list). And a walk that had already read the old `->lookup` at the moment a parent was being
+registered can still cache one entry after the registration's invalidation pass; the name is dropped again
+at the next set change, and a user's directories are normally created and cached before the stream that
+protects them arrives.
 
 ## Naming an isolated child
 

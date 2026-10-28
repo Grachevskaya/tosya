@@ -167,6 +167,37 @@ u32 policy_lookup_as(uid_t caller, uid_t target);
 #define TOSYA_APK_MAX 65536
 
 /*
+ * The data directories a package is not supposed to have (dir_hook.c). The parents
+ * whose ->lookup is replaced are recorded for the life of the module; the hidden
+ * names arrive as a set, keyed by the app id the caller was born with.
+ */
+#define TOSYA_DIR_MAX 1024u // protected parent directories
+#define TOSYA_HIDDEN_MAX 8192u // names in one set
+#define TOSYA_NAME_MAX 255u // a package name is shorter than this
+int tosya_dir_init(void);
+void tosya_dir_exit(void);
+void tosya_dir_refresh(void);
+void tosya_dir_names_reset(void);
+int tosya_dir_name_add(u32 op, u32 caller, const u8 *name, u32 len);
+int tosya_dir_names_apply(void);
+/* The 128-bit secret a token stream carries (netlink.c). The synthetic names a
+ * hidden lookup asks the filesystem about are derived from it and never leave
+ * kernel memory: this only hands it to the directory side. */
+void tosya_token_get(u32 out[4]);
+struct qstr;
+/*
+ * The one preparation a walk makes: probe the published set the fixed number of
+ * times, then report the hit, the entry's stored mask bytes and the entry's
+ * precomputed hash(M). The hook selects them, or the original bytes and hash,
+ * with conditional selects. The length is not touched: the stored mask has the
+ * name's length.
+ */
+bool tosya_dir_walk_last(const struct qstr *last, const u8 **mask_bytes,
+			 u32 *mask_hash);
+u32 tosya_dir_name_count(void);
+u32 tosya_dir_guard_count(void);
+
+/*
  * Streaming upload entry points (used by netlink.c): one record lands one file, gen is
  * the generation of this upload. finish parks every entry outside that generation and
  * returns how many stayed.
@@ -318,9 +349,12 @@ void tosya_status_set_uid_tier(const char *name);
 void tosya_status_set_setuid_tier(const char *name);
 void tosya_status_set_apks(unsigned int inodes, unsigned int expected,
 			   unsigned int failed);
+void tosya_status_set_hidden(unsigned int names, unsigned int guards);
+void tosya_status_set_hidden_failed(unsigned int failed);
 void tosya_status_note(int error);
 
 int tosya_unlock_inode_install(void);
+int tosya_lookup_fast_install(void);
 int tosya_evict_inode_install(void);
 
 int policy_init(void);
@@ -340,7 +374,7 @@ bool tosya_inline_active(void);
 // Read kernel text through the nofault copy, for diagnostics only.
 bool tosya_read(const void *src, void *dst, size_t len);
 int tosya_patch_init(void);
-unsigned long tosya_lookup(const char *name);
+unsigned long tosya_sym(const char *name);
 
 /*
  * A symbol's address and its extent: the following symbol bounds it, which is

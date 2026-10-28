@@ -14,6 +14,7 @@
 #include "inline_entry.h"
 #include "inline_alloc.h"
 #include "tier.h"
+#include <linux/namei.h>
 
 // Displaced prefix plus the veneer that returns from it.
 #define TOSYA_INLINE_STORAGE_SIZE 64
@@ -133,6 +134,7 @@ struct tosya_inline_hook {
 	unsigned long site;
 	u32 saved;
 	bool installed;
+	bool allow_indirect; // a hook whose target has an indirect call the prefix never moves
 	struct tosya_inline_region region;
 };
 
@@ -229,7 +231,8 @@ static int inline_install(struct tosya_inline_hook *hook)
 	if (!distant) {
 		rc = tosya_inline_trampoline(scratch, sizeof(scratch), source,
 					     addr, (unsigned long)hook->copy,
-					     size, skip, &written);
+					     size, skip, &written,
+					     hook->allow_indirect);
 		if (rc != TOSYA_INLINE_OK)
 			return inline_errno(rc);
 	}
@@ -258,7 +261,7 @@ static int inline_install(struct tosya_inline_hook *hook)
 			original + 1,
 			TOSYA_INLINE_STORAGE_SIZE - TOSYA_INLINE_INSN, source,
 			addr, (unsigned long)(original + 1), size, skip,
-			&original_len);
+			&original_len, hook->allow_indirect);
 		if (rc != TOSYA_INLINE_OK) {
 			rc = inline_errno(rc);
 			goto free_region;
@@ -394,6 +397,234 @@ extern void tosya_unlock_inode_stub(struct inode *inode);
 extern void tosya_unlock_inode_pacia_stub(struct inode *inode);
 extern void tosya_unlock_inode_pacib_stub(struct inode *inode);
 void tosya_unlock_inode_hook(struct inode *inode);
+
+extern u32 g_lookup_fast_copy[];
+extern struct dentry *tosya_lookup_fast_orig(void *nd);
+extern struct dentry *tosya_lookup_fast_stub(void *nd);
+extern struct dentry *tosya_lookup_fast_pacia_stub(void *nd);
+extern struct dentry *tosya_lookup_fast_pacib_stub(void *nd);
+struct dentry *tosya_lookup_fast_hook(void *nd);
+
+/*
+ * The copy of the displaced lookup_fast() prefix and the stubs that enter the C
+ * hook. The copy is the original-call alias; the three stubs differ only in
+ * whether they undo a signing instruction the entry left in place.
+ */
+asm(".pushsection \".text.tosya_inline\",\"ax\"\n" TOSYA_ASM_COPY(
+	"g_lookup_fast_copy",
+	"tosya_lookup_fast_orig") TOSYA_ASM_STUB("tosya_lookup_fast_stub", "",
+						 "tosya_lookup_fast_hook")
+	    TOSYA_ASM_STUB("tosya_lookup_fast_pacia_stub", "\tautiasp\n",
+			   "tosya_lookup_fast_hook")
+		    TOSYA_ASM_STUB("tosya_lookup_fast_pacib_stub",
+				   "\tautibsp\n",
+				   "tosya_lookup_fast_hook") "\n.popsection\n");
+
+/*
+ * A64 pieces used to find nd->last in the running kernel. struct nameidata is
+ * private to fs/namei.c, so its layout is not in any header this module may
+ * include. The function itself says where the qstr is: lookup_fast() passes
+ * &nd->last as the second argument of __d_lookup_rcu()/__d_lookup(), and it
+ * reads nd->flags (four pointers and two qstrs further on) on the same entry
+ * path. Both facts are checked before the entry is patched; an offset that
+ * cannot be confirmed refuses the hook instead of guessing.
+ */
+#define TOSYA_A64_ADD_IMM 0x91000000u
+#define TOSYA_A64_ADD_IMM_MASK 0xff000000u
+#define TOSYA_A64_MOV_X 0xaa0003e0u
+#define TOSYA_A64_MOV_X_MASK 0xffe0ffe0u
+#define TOSYA_A64_BL 0x94000000u
+#define TOSYA_A64_BL_MASK 0xfc000000u
+#define TOSYA_A64_LDRB_IMM 0x39400000u
+#define TOSYA_A64_LDRW_IMM 0xb9400000u
+#define TOSYA_A64_LDR_IMM_MASK 0xffc00000u
+
+static long tosya_sx26(u32 value)
+{
+	return (long)(value & 0x01ffffffu) - (long)(value & 0x02000000u);
+}
+
+/*
+ * The alias set starts with x0 (the nd argument). A register that received x0,
+ * or an alias of it, joins the set; every other write removes the destination.
+ * ADD (immediate) into x1 from the set is the qstr pointer; a BL to one of the
+ * two dcache lookups consumes that pointer.
+ */
+static bool tosya_nd_last_offset(u32 *out)
+{
+	unsigned long addr, size, dlookup, dlookup_rcu;
+	/* Installation is serialized module init; the snapshot need not be on stack. */
+	static u32 source[TOSYA_INLINE_MAX_FUNC / TOSYA_INLINE_INSN];
+	u32 alias, x1_off;
+	size_t words, i;
+	bool found = false;
+	u32 off = 0;
+
+	if (!tosya_symbol_range("lookup_fast", &addr, &size))
+		return false;
+	if (size > TOSYA_INLINE_MAX_FUNC)
+		size = TOSYA_INLINE_MAX_FUNC;
+	size &= ~(unsigned long)(TOSYA_INLINE_INSN - 1u);
+	if (size < 8u * TOSYA_INLINE_INSN ||
+	    !tosya_read((const void *)addr, source, size))
+		return false;
+	/*
+	 * The BL target is the function body, never the pre-kCFI jump-table
+	 * veneer: use the raw lookup, not tosya_sym()'s callable-address one.
+	 */
+	dlookup = tosya_lookup_raw("__d_lookup");
+	dlookup_rcu = tosya_lookup_raw("__d_lookup_rcu");
+	words = size / TOSYA_INLINE_INSN;
+
+	alias = 1u;
+	x1_off = ~0u;
+	for (i = 0; i < words; i++) {
+		const u32 insn = source[i];
+		const u32 rd = insn & 31u;
+		const u32 rn = (insn >> 5) & 31u;
+
+		if ((insn & TOSYA_A64_MOV_X_MASK) == TOSYA_A64_MOV_X) {
+			const u32 rm = (insn >> 16) & 31u;
+
+			if (alias & (1u << rm)) {
+				alias |= 1u << rd;
+				if (rd == 1u)
+					x1_off = 0;
+			} else {
+				alias &= ~(1u << rd);
+				if (rd == 1u)
+					x1_off = ~0u;
+			}
+			continue;
+		}
+		if ((insn & TOSYA_A64_ADD_IMM_MASK) == TOSYA_A64_ADD_IMM &&
+		    !(insn & (1u << 22))) {
+			const u32 imm = (insn >> 10) & 0xfffu;
+
+			if (alias & (1u << rn)) {
+				alias |= 1u << rd;
+				if (rd == 1u)
+					x1_off = imm;
+			} else {
+				alias &= ~(1u << rd);
+				if (rd == 1u)
+					x1_off = ~0u;
+			}
+			continue;
+		}
+		if ((insn & TOSYA_A64_BL_MASK) == TOSYA_A64_BL) {
+			const long delta = tosya_sx26(insn & 0x03ffffffu) *
+					   (long)TOSYA_INLINE_INSN;
+			const unsigned long target = addr +
+						     i * TOSYA_INLINE_INSN +
+						     (unsigned long)delta;
+
+			if ((target == dlookup || target == dlookup_rcu) &&
+			    x1_off != ~0u && x1_off >= 8u && x1_off <= 512u &&
+			    !(x1_off & 7u)) {
+				off = x1_off;
+				found = true;
+			}
+			continue;
+		}
+		if (rd != 31u) {
+			alias &= ~(1u << rd);
+			if (rd == 1u)
+				x1_off = ~0u;
+		}
+	}
+
+	/*
+	 * The second fact: the same nd has a flags word just past the qstr, at
+	 * nd + off + 0x28 (path, qstr, root and the inode pointer fill 0x38
+	 * bytes), and lookup_fast() reads it as a byte. Requiring that load makes
+	 * a chance ADD of some other constant unusable.
+	 */
+	alias = 1u;
+	for (i = 0; found && i < words; i++) {
+		const u32 insn = source[i];
+		const u32 rd = insn & 31u;
+		const u32 rn = (insn >> 5) & 31u;
+
+		if ((insn & TOSYA_A64_MOV_X_MASK) == TOSYA_A64_MOV_X) {
+			const u32 rm = (insn >> 16) & 31u;
+
+			if (alias & (1u << rm))
+				alias |= 1u << rd;
+			else
+				alias &= ~(1u << rd);
+			continue;
+		}
+		if ((insn & TOSYA_A64_LDR_IMM_MASK) == TOSYA_A64_LDRB_IMM ||
+		    (insn & TOSYA_A64_LDR_IMM_MASK) == TOSYA_A64_LDRW_IMM) {
+			const u32 imm = (insn >> 10) & 0xfffu;
+
+			if ((alias & (1u << rn)) &&
+			    (imm == off + 0x28u || imm == off + 0x29u))
+				goto confirmed;
+		}
+		if (rd != 31u)
+			alias &= ~(1u << rd);
+	}
+	return false;
+
+confirmed:
+	*out = off;
+	pr_info("tosya: lookup_fast's nd->last is at +%#x (checked against nd->flags)\n",
+		off);
+	return true;
+}
+
+static u32 g_nd_last_off;
+
+/*
+ * The one walk hook. lookup_fast(nd) is the point where the VFS is about to ask
+ * the dcache for nd->last; before it does, this hook asks the published set:
+ *
+ *   - dir_hidden_probe() reads its fixed number of pair slots, the same run for
+ *     every name;
+ *   - two conditional selects then take the entry's stored mask bytes and
+ *     precomputed hash(M), or leave the original bytes and hash in place.
+ *
+ * There is no allocation, no lock and no scratch buffer: the mask bytes live in
+ * the published set, and replaced sets are retained so the pointer in nd->last
+ * stays valid when lookup_slow() reads it after the hook has returned.
+ */
+noinline struct dentry *tosya_lookup_fast_hook(void *nd)
+{
+	struct qstr *last = (struct qstr *)((u8 *)nd + g_nd_last_off);
+	struct qstr asked = *last;
+	const u8 *mask_bytes;
+	u32 mask_hash;
+	bool hit;
+
+	hit = tosya_dir_walk_last(&asked, &mask_bytes, &mask_hash);
+	last->name = hit ? mask_bytes : last->name;
+	last->hash = hit ? mask_hash : last->hash;
+	return tosya_lookup_fast_orig(nd);
+}
+
+static struct tosya_inline_hook g_lookup_fast = {
+	.name = "lookup_fast",
+	.allow_indirect = true,
+	.copy = g_lookup_fast_copy,
+	.hook = (unsigned long)tosya_lookup_fast_hook,
+	.stub = (unsigned long)tosya_lookup_fast_stub,
+	.pacia_stub = (unsigned long)tosya_lookup_fast_pacia_stub,
+	.pacib_stub = (unsigned long)tosya_lookup_fast_pacib_stub,
+};
+
+int tosya_lookup_fast_install(void)
+{
+	u32 off;
+
+	if (!tosya_nd_last_offset(&off)) {
+		pr_warn("tosya: lookup_fast's nameidata layout cannot be confirmed; the walk is not filtered\n");
+		return -EOPNOTSUPP;
+	}
+	g_nd_last_off = off;
+	return inline_install(&g_lookup_fast);
+}
 
 static struct tosya_inline_hook g_unlock_inode = {
 	.name = "unlock_new_inode",

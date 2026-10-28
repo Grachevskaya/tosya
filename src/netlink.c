@@ -100,6 +100,8 @@ static int kaux_begin(struct sk_buff *skb, struct genl_info *info)
 	g_offered = 0;
 	g_failed = 0;
 	g_policy_words = 0;
+	// A names stream is built from scratch, and a previous one that never ended leaves nothing.
+	tosya_dir_names_reset();
 	mutex_unlock(&g_stream_lock);
 	mutex_unlock(&g_apply_lock);
 	return 0;
@@ -145,6 +147,41 @@ static int kaux_batch_apks(const struct kaux_batch *b, const u32 *p, u32 words)
 		g_failed += failed;
 		pr_warn("tosya: %u of %u record(s) in a batch did not land\n",
 			failed, b->count);
+	}
+	return 0;
+}
+
+/*
+ * The directory side: one record is one (caller, package) pair, and the set is
+ * replaced at END, so nothing is published from a batch.
+ */
+static int kaux_batch_names(const struct kaux_batch *b, const u32 *p, u32 words)
+{
+	u32 i, at = 1, failed = 0;
+
+	for (i = 0; i < b->count; i++) {
+		const struct kaux_name_rec *r;
+
+		if (at + KAUX_NAME_REC_WORDS > words)
+			return -EINVAL;
+		r = (const struct kaux_name_rec *)(p + at);
+		if (r->op > KAUX_OP_MAX)
+			return -EINVAL;
+		if (r->name_len > (words - at - KAUX_NAME_REC_WORDS) * 4u)
+			return -EINVAL;
+		if (tosya_dir_name_add(
+			    r->op, r->caller,
+			    (const u8 *)(p + at + KAUX_NAME_REC_WORDS),
+			    r->name_len))
+			failed++;
+		// The name pads the record out to a four byte boundary.
+		at += KAUX_NAME_REC_WORDS + (r->name_len + 3u) / 4u;
+	}
+
+	if (failed) {
+		g_failed += failed;
+		pr_warn("tosya: %u of %u hidden name(s) did not land\n", failed,
+			b->count);
 	}
 	return 0;
 }
@@ -242,6 +279,9 @@ static int kaux_batch(struct sk_buff *skb, struct genl_info *info)
 	case KAUX_KIND_APKS:
 		rc = kaux_batch_apks(b, p, words);
 		break;
+	case KAUX_KIND_NAMES:
+		rc = kaux_batch_names(b, p, words);
+		break;
 	default:
 		rc = -EINVAL;
 	}
@@ -287,9 +327,56 @@ static int kaux_end(struct sk_buff *skb, struct genl_info *info)
 		tosya_status_set_apks(left, offered, failed);
 		if (failed)
 			rc = -EIO;
+	} else if (kind == KAUX_KIND_NAMES) {
+		int nrc = tosya_dir_names_apply();
+
+		tosya_status_set_hidden_failed(failed);
+		if (nrc != 0) {
+			rc = nrc;
+			tosya_status_note(nrc);
+		} else {
+			/*
+			 * A user may have appeared since the last pass; the
+			 * names only reach directories that are protected.
+			 */
+			tosya_dir_refresh();
+			tosya_status_set_hidden(tosya_dir_name_count(),
+						tosya_dir_guard_count());
+			tosya_status_set_hidden_failed(failed);
+			pr_info("tosya: hidden-name stream: %u record(s), %u name(s), %u refused\n",
+				offered, tosya_dir_name_count(), failed);
+			if (failed)
+				rc = -EIO;
+		}
 	}
 	mutex_unlock(&g_apply_lock);
 	return rc;
+}
+
+/*
+ * The name masks in dir_hook.c are derived from the token, so that side has to
+ * read it. Every caller is serialized by g_apply_lock -- the token batch, the
+ * names END that builds a set, and the status reply all hold it -- so no lock is
+ * taken here (and tosya_dir_names_apply() must not take one: its caller already
+ * holds g_apply_lock).
+ */
+void tosya_token_get(u32 out[4])
+{
+	u32 i;
+
+	for (i = 0; i < 4; i++)
+		out[i] = READ_ONCE(g_token[i]);
+}
+
+// A user was added or removed: resolve the protected parents again.
+static int kaux_refresh(struct sk_buff *skb, struct genl_info *info)
+{
+	if (kaux_version(info))
+		return -EPROTONOSUPPORT;
+	mutex_lock(&g_apply_lock);
+	tosya_dir_refresh();
+	mutex_unlock(&g_apply_lock);
+	return 0;
 }
 
 static int kaux_ping(struct sk_buff *skb, struct genl_info *info)
@@ -341,6 +428,9 @@ static const struct genl_ops kaux_ops[] = {
 	{ .cmd = KAUX_CMD_STATUS,
 	  .flags = GENL_ADMIN_PERM,
 	  .doit = kaux_status },
+	{ .cmd = KAUX_CMD_REFRESH,
+	  .flags = GENL_ADMIN_PERM,
+	  .doit = kaux_refresh },
 	{ .cmd = KAUX_CMD_BEGIN, .flags = GENL_ADMIN_PERM, .doit = kaux_begin },
 	{ .cmd = KAUX_CMD_BATCH, .flags = GENL_ADMIN_PERM, .doit = kaux_batch },
 	{ .cmd = KAUX_CMD_END, .flags = GENL_ADMIN_PERM, .doit = kaux_end },

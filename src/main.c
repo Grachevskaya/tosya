@@ -54,6 +54,9 @@ static int __init tosya_init(void)
 
 	tosya_debug_init(tosya_debug);
 
+	/* The protected parents are resolved before anything can ask for them:
+	 * a names stream that arrived first would have nowhere to land. */
+	tosya_dir_init();
 	netlink_init();
 	/* An inline tier may pin this module and publish a kernel entry below.
 	 * Module-loader failure frees even pinned modules: no error return after
@@ -87,6 +90,7 @@ static void __exit tosya_exit(void)
 {
 	cancel_delayed_work_sync(&tosya_debug_work);
 	netlink_exit();
+	tosya_dir_exit();
 	hooks_remove();
 	policy_free();
 	pr_info("tosya: unloaded\n");

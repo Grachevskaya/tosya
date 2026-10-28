@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.7.0
+
+- The data directories of a hidden package are answered as if the package were not installed. The parents
+  `/data/user/<u>` and `/data/user_de/<u>` (the first is the same inode as `/data/data`) get a private
+  copy of their `inode_operations` with only `->lookup` replaced, and one inline hook on
+  `lookup_fast()` decides before the dcache is asked: for a caller the name is hidden from, the name and the
+  hash the set published are put in place of the asked ones, so the filesystem is asked about a mask nobody
+  can carry and leaves the negative entry an absent name leaves.
+
+- The mask is generated once, when the set is published, keeps the length of the name it stands for, and is
+  kept in the entry: the walk neither builds nor hashes it. Its probe reads a fixed number of pair slots and
+  both answers are prepared by the same instructions, so a hidden name and one that was never installed cost
+  the caller the same -- the answer the uid side of the module already gave.
+
+- Names travel in `KAUX_KIND_NAMES` and replace the whole set at END; the parents are resolved again at
+  load, on `KAUX_CMD_REFRESH`, and at the end of every names stream, because a module loaded before
+  `/data` was complete found only part of them. The family speaks version 7.
+
+- The inline hook installer no longer refuses a target whose body holds an indirect branch: only the
+  displaced prefix is relocated, so a hook that accepts such a target declares it. `lookup_fast` calls
+  `d_revalidate` through a register, and without this the walk hook was never installed.
+
+- One limit is worth stating: `inode_operations` has no owner the VFS could hold a reference on, so the
+  first protected parent pins the module, and an armed module does not unload.
+
 ## 0.6.0
 
 - The family speaks version 6, and the name both halves work out travels with the state they already

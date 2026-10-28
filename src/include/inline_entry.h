@@ -37,4 +37,5 @@ int tosya_inline_veneer(void *out, size_t out_size, unsigned long target,
  */
 int tosya_inline_trampoline(void *out, size_t out_size, const void *from,
 			    unsigned long from_va, unsigned long to_va,
-			    size_t len, size_t patch_offset, size_t *out_len);
+			    size_t len, size_t patch_offset, size_t *out_len,
+			    bool allow_indirect);

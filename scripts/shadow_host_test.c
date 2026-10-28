@@ -207,7 +207,7 @@ static void path_put(struct path *p)
 
 static struct super_block *host_user_get_super(dev_t dev, bool rw);
 
-static unsigned long tosya_lookup(const char *name)
+static unsigned long tosya_sym(const char *name)
 {
 	/* The block resolves the super block helper through this name, so the host hands it its own:
 	 * that is what lets the sweep put a file back and the unload path hand every record away. */

@@ -615,48 +615,129 @@ bool tosya_apk_shadow_apply(struct inode *inode)
  *
  * What must not be done is grabbing it again, or reading i_count first: an extra reference leaks,
  * and a count read from an inode nobody holds is a read of something that may already be free.
+ * What it must not do either is ask the cache while holding the table: an inode that is evicted
+ * here runs tosya_apk_shadow_reclaim(), which takes that same lock, so the whole scan would wait
+ * on itself. The numbers are copied out under the lock and the asking is done without it.
  */
 typedef struct super_block *(*tosya_user_get_super_t)(dev_t, bool);
 static tosya_user_get_super_t g_user_get_super;
 
+/*
+ * What the sweep carries out of the table: the numbers a record is named by, never the record.
+ * A record can be parked, or given back to the allocator by the stream ending, while the cache is
+ * being asked with the lock dropped, so a pointer read under the lock would be a pointer to
+ * something that may already be gone. Numbers are values: what they name is found again by
+ * ilookup(), and a record that left in the meantime is simply not found, which is the answer the
+ * scan would have given for it anyway.
+ */
+struct tosya_shadow_key {
+	u32 dev;
+	u64 ino;
+};
+
+// Every record still waiting for a table, copied out as the numbers that name it.
+static u32 shadow_snapshot(struct tosya_shadow_key *keys, u32 max)
+{
+	u32 i, n = 0;
+
+	for (i = 0; i < g_shadow_n && n < max; i++) {
+		struct tosya_shadow *s = g_shadow[i];
+
+		if (s->parked || READ_ONCE(s->orig_fops) != NULL)
+			continue;
+		keys[n].dev = s->dev;
+		keys[n].ino = s->ino;
+		n++;
+	}
+	return n;
+}
+
+/*
+ * Is this inode already carrying one of our tables? Read through i_fop the way the open path
+ * does, and nothing behind the pointer is read unless ->open is this module's function.
+ */
+static bool shadow_armed(struct inode *inode)
+{
+	const struct file_operations *op = READ_ONCE(inode->i_fop);
+
+	return op != NULL && op->open == tosya_shadow_open;
+}
+
+/*
+ * One record's file, asked of the cache. locked says the caller is still holding the table, which
+ * is only true when there was no memory for the snapshot: the sweep's ordinary shape is to call
+ * this with the lock dropped, so the cache is never held up by the rest of the scan, and the
+ * iput() below can run an eviction that takes the table lock for itself.
+ *
+ * The reference ilookup() answered with is this call's to give back, and it is given back before
+ * the super block is: an inode evicted by that iput() runs the filesystem's ->evict_inode, which
+ * is where tosya_apk_shadow_reclaim() takes the very lock this call is not holding.
+ */
+static void shadow_sweep_one(const struct tosya_shadow_key *key, bool locked)
+{
+	const struct file_operations *cur;
+	struct super_block *sb;
+	struct inode *inode;
+
+	sb = g_user_get_super(new_decode_dev(key->dev), false);
+	if (sb == NULL)
+		return;
+	inode = ilookup(sb, key->ino);
+	if (inode != NULL) {
+		// An inode already carrying this record's table is the ordinary case, not a refusal.
+		if (!shadow_apply(inode, locked) && !shadow_armed(inode)) {
+			cur = READ_ONCE(inode->i_fop);
+			pr_info_once(
+				"tosya: sweep could not arm ino %llu: mode %o, fop %s\n",
+				(unsigned long long)key->ino, inode->i_mode,
+				cur == NULL ? "none" : "set");
+		}
+		iput(inode);
+	}
+	drop_super(sb);
+}
+
 void tosya_apk_shadow_sweep(void)
 {
-	u32 i;
+	struct tosya_shadow_key *keys;
+	u32 i, n;
 
 	if (g_user_get_super == NULL)
-		g_user_get_super = (void *)tosya_lookup("user_get_super");
+		g_user_get_super = (void *)tosya_sym("user_get_super");
 	if (g_user_get_super == NULL)
 		return;
+	/*
+	 * Two phases, so an apk scan does not stand in the way of every eviction: the lock is held
+	 * only while the numbers are copied out, and the cache is asked with it dropped. The numbers
+	 * are what makes that safe -- a record the array no longer holds cannot be read here.
+	 */
 	mutex_lock(&g_shadow_lock);
+	if (g_shadow_n == 0) {
+		mutex_unlock(&g_shadow_lock);
+		return;
+	}
+	keys = kmalloc_array(g_shadow_n, sizeof(*keys), GFP_KERNEL);
+	if (keys != NULL) {
+		n = shadow_snapshot(keys, g_shadow_n);
+		mutex_unlock(&g_shadow_lock);
+		for (i = 0; i < n; i++)
+			shadow_sweep_one(&keys[i], false);
+		kfree(keys);
+		return;
+	}
+	/*
+	 * No memory for the snapshot: the shape this function had before, with correctness kept.
+	 * The table stays locked while the cache is asked, and shadow_apply() is told that it is.
+	 */
 	for (i = 0; i < g_shadow_n; i++) {
-		struct tosya_shadow *s = g_shadow[i];
-		struct super_block *sb;
-		struct inode *inode;
+		struct tosya_shadow_key key;
 
-		if (s->parked)
+		if (g_shadow[i]->parked ||
+		    READ_ONCE(g_shadow[i]->orig_fops) != NULL)
 			continue;
-		sb = g_user_get_super(new_decode_dev(s->dev), false);
-		if (sb == NULL)
-			continue;
-		inode = ilookup(sb, s->ino);
-		if (inode != NULL) {
-			// The reference ilookup answered with is ours to give back.
-			// An inode already carrying this record's table is the ordinary case, not a refusal.
-			if (!shadow_apply(inode, true) &&
-			    READ_ONCE(inode->i_fop) != &s->fops)
-				pr_info_once(
-					"tosya: sweep could not arm ino %llu: mode %o, fop %s, orig %s\n",
-					(unsigned long long)s->ino,
-					inode->i_mode,
-					READ_ONCE(inode->i_fop) == NULL ?
-						"none" :
-						"set",
-					READ_ONCE(s->orig_fops) == NULL ?
-						"none" :
-						"set");
-			iput(inode);
-		}
-		drop_super(sb);
+		key.dev = g_shadow[i]->dev;
+		key.ino = g_shadow[i]->ino;
+		shadow_sweep_one(&key, true);
 	}
 	mutex_unlock(&g_shadow_lock);
 }
@@ -738,7 +819,7 @@ void tosya_apk_remove(void)
 	u32 i, unresolved = 0;
 
 	if (g_user_get_super == NULL)
-		g_user_get_super = (void *)tosya_lookup("user_get_super");
+		g_user_get_super = (void *)tosya_sym("user_get_super");
 	mutex_lock(&g_shadow_lock);
 	for (i = 0; i < g_shadow_n; i++) {
 		struct tosya_shadow *s = g_shadow[i];

@@ -115,7 +115,7 @@ static void *tosya_resolve_target(void)
 	for (i = 0; i < ARRAY_SIZE(tosya_target_names); i++) {
 		/* the spelling a table holds: jump-table entry before 6.1, plain
 		 * symbol from there on */
-		unsigned long addr = tosya_lookup(tosya_target_names[i]);
+		unsigned long addr = tosya_sym(tosya_target_names[i]);
 		unsigned long plain;
 
 		if (!addr) {
@@ -132,7 +132,7 @@ static void *tosya_resolve_target(void)
 
 static int tosya_lsm_install_hook(void)
 {
-	unsigned long heads_addr = tosya_lookup("security_hook_heads");
+	unsigned long heads_addr = tosya_sym("security_hook_heads");
 	struct hlist_head *head;
 	struct security_hook_list *e;
 	void *target = tosya_resolve_target();
@@ -369,8 +369,8 @@ static int tosya_fix_setuid(struct cred *new, const struct cred *old, int flags)
 
 static int tosya_lsm_install_hook(void)
 {
-	unsigned long table = tosya_lookup("static_calls_table");
-	unsigned long cnt_addr = tosya_lookup("lsm_active_cnt");
+	unsigned long table = tosya_sym("static_calls_table");
+	unsigned long cnt_addr = tosya_sym("lsm_active_cnt");
 	size_t size = sizeof(struct lsm_static_calls_table);
 	size_t count, i;
 	struct lsm_static_call *scalls;
@@ -389,11 +389,11 @@ static int tosya_lsm_install_hook(void)
 
 	/* the implementations that exist: commoncap has one on every kernel this
 	 * module is built for, safesetid is the only other (see the list above) */
-	target = (void *)tosya_lookup("cap_task_fix_setuid");
+	target = (void *)tosya_sym("cap_task_fix_setuid");
 	if (!target)
 		target = (void *)tosya_lookup_raw("cap_task_fix_setuid");
 	if (!target)
-		target = (void *)tosya_lookup("safesetid_task_fix_setuid");
+		target = (void *)tosya_sym("safesetid_task_fix_setuid");
 	if (!target)
 		return -ENOENT;
 
@@ -403,7 +403,7 @@ static int tosya_lsm_install_hook(void)
 	 * rather than this build's count: take it from kallsyms when that can be reached
 	 * (KernelSU reads it the same way) and keep the compile-time count when it cannot.
 	 */
-	size_fn = (void *)tosya_lookup("kallsyms_lookup_size_offset");
+	size_fn = (void *)tosya_sym("kallsyms_lookup_size_offset");
 	if (size_fn) {
 		unsigned long sym_size = size;
 

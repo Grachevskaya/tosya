@@ -48,6 +48,15 @@ int hooks_install(void)
 	 * syscalls asks on its USER lookup path. One find_user entry hook serves
 	 * the native and compat callers.
 	 */
+	/*
+	 * One walk hook, one preparation: lookup_fast() turns a hidden name into
+	 * its mask and the entry's hash(M) before the dcache is asked. A miss then
+	 * takes the ordinary slow path, where the replaced ->lookup leaves the
+	 * negative entry; the old __d_lookup_rcu/__d_lookup/full_name_hash hooks
+	 * are gone with the design that needed them.
+	 */
+	if (tosya_lookup_fast_install())
+		pr_warn("tosya: the fast walk is not filtered\n");
 	if (tosya_unlock_inode_install())
 		pr_warn("tosya: the inode unlock hook is not in place; names are not shadowed\n");
 	if (tosya_evict_inode_install())

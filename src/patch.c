@@ -157,7 +157,7 @@ static noinline void __nocfi find_symbol(const char *name, struct find_ctx *ctx,
 #endif
 }
 
-unsigned long tosya_lookup(const char *name)
+unsigned long tosya_sym(const char *name)
 {
 	unsigned long addr;
 
@@ -360,9 +360,9 @@ int tosya_patch_init(void)
 {
 	/* The kernel's own extent: every patch target has to be inside it, or the
 	 * write would land somewhere it has no business being. */
-	g_text_start = tosya_lookup("_stext");
-	g_text_end = tosya_lookup("_end");
-	g_core_text_end = tosya_lookup("_etext");
+	g_text_start = tosya_sym("_stext");
+	g_text_end = tosya_sym("_end");
+	g_core_text_end = tosya_sym("_etext");
 
 	/*
 	 * This module's own text: the copy of a hooked function and the stub that
@@ -378,20 +378,20 @@ int tosya_patch_init(void)
 	g_mod_end = g_mod_start + THIS_MODULE->core_layout.text_size;
 #endif
 
-	patch_mm = (struct mm_struct *)tosya_lookup("init_mm");
-	g_kimage_voffset = (unsigned long *)tosya_lookup("kimage_voffset");
-	g_memstart_addr = (unsigned long *)tosya_lookup("memstart_addr");
-	g_set_fixmap_addr = tosya_lookup("__set_fixmap");
-	g_copy_nofault_addr = tosya_lookup("copy_to_kernel_nofault");
+	patch_mm = (struct mm_struct *)tosya_sym("init_mm");
+	g_kimage_voffset = (unsigned long *)tosya_sym("kimage_voffset");
+	g_memstart_addr = (unsigned long *)tosya_sym("memstart_addr");
+	g_set_fixmap_addr = tosya_sym("__set_fixmap");
+	g_copy_nofault_addr = tosya_sym("copy_to_kernel_nofault");
 	if (!g_copy_nofault_addr)
-		g_copy_nofault_addr = tosya_lookup("__copy_to_kernel_nofault");
-	g_copy_from_nofault_addr = tosya_lookup("copy_from_kernel_nofault");
+		g_copy_nofault_addr = tosya_sym("__copy_to_kernel_nofault");
+	g_copy_from_nofault_addr = tosya_sym("copy_from_kernel_nofault");
 	if (!g_copy_from_nofault_addr)
 		g_copy_from_nofault_addr =
-			tosya_lookup("__copy_from_kernel_nofault");
+			tosya_sym("__copy_from_kernel_nofault");
 	/* Stable arm64 signature across supported ACK trees; the implementation
 	 * owns its fixmap geometry, lock and instruction cache maintenance. */
-	g_patch_insn_addr = tosya_lookup("aarch64_insn_patch_text_nosync");
+	g_patch_insn_addr = tosya_sym("aarch64_insn_patch_text_nosync");
 	if (TOSYA_DEBUG_ON())
 		pr_info("tosya: init_mm=%px kimage_voffset=%px memstart_addr=%px set_fixmap=%px nofault=%px mod=%#lx-%#lx\n",
 			(void *)patch_mm, (void *)g_kimage_voffset,

@@ -97,7 +97,8 @@ static int entry_displaceable(unsigned int word)
 }
 
 static int entry_body_safe(const unsigned int *src, size_t len,
-			   unsigned long from_va, size_t prefix)
+			   unsigned long from_va, size_t prefix,
+			   bool allow_indirect)
 {
 	size_t offset;
 	const unsigned long end = from_va + prefix;
@@ -111,8 +112,15 @@ static int entry_body_safe(const unsigned int *src, size_t len,
 		/* An indirect branch keeps its destination in a register: there is no field here to
 		 * read and nothing to redirect, so a replay of it could carry a target this path never
 		 * wrote. Refused, the same way a branch back into the patch is. */
-		if ((word & 0xfffffc1fu) == 0xd61f0000u ||
-		    (word & 0xfffffc1fu) == 0xd63f0000u)
+		/*
+		 * An indirect branch keeps its destination in a register. Only the displaced prefix is
+		 * moved, so an indirect branch further down the function is not relocated and cannot land
+		 * inside the window unless something took the entry as an address -- which a caller that
+		 * asks for it accepts, because the stub is re-entrant: the name it rewrites is already the
+		 * mask on the second pass, so a replay changes nothing.
+		 */
+		if (!allow_indirect && ((word & 0xfffffc1fu) == 0xd61f0000u ||
+					(word & 0xfffffc1fu) == 0xd63f0000u))
 			return 0;
 		if ((word & 0x7c000000u) == 0x14000000u) {
 			bits = 26;
@@ -164,7 +172,8 @@ static int entry_body_safe(const unsigned int *src, size_t len,
 
 int tosya_inline_trampoline(void *out, size_t out_size, const void *from,
 			    unsigned long from_va, unsigned long to_va,
-			    size_t len, size_t patch_offset, size_t *out_len)
+			    size_t len, size_t patch_offset, size_t *out_len,
+			    bool allow_indirect)
 {
 	unsigned int scratch[TOSYA_INLINE_TRAMPOLINE_MAX / TOSYA_INLINE_INSN];
 	const unsigned int *src = from;
@@ -201,7 +210,7 @@ int tosya_inline_trampoline(void *out, size_t out_size, const void *from,
 			return TOSYA_INLINE_EINSN;
 		}
 	}
-	if (!entry_body_safe(src, len, from_va, prefix)) {
+	if (!entry_body_safe(src, len, from_va, prefix, allow_indirect)) {
 		size_t i;
 
 		for (i = 0; i < prefix / TOSYA_INLINE_INSN; ++i)

@@ -119,7 +119,7 @@ static void trampoline_refused(const unsigned int *source, size_t len,
 	memset(output, 0xa5, sizeof(output));
 	memcpy(before, output, sizeof(before));
 	check(tosya_inline_trampoline(output, capacity, source, FROM_VA, to,
-				      len, skip, &written) == expected,
+				      len, skip, &written, false) == expected,
 	      what);
 	check(written == 0 && !memcmp(output, before, sizeof(output)),
 	      "trampoline refusal clears length and leaves output untouched");
@@ -159,7 +159,8 @@ static void trampoline_tests(void)
 		written = 999;
 		check(tosya_inline_trampoline(output, sizeof(output), source,
 					      FROM_VA, TO_VA, sizeof(source),
-					      entries[i].skip, &written) == 0,
+					      entries[i].skip, &written,
+					      false) == 0,
 		      "plain and BTI/PAC entries build a short trampoline");
 		// This checks PAC instruction preservation, not hardware authentication.
 		check(written == prefix + 4 && !memcmp(output, source, prefix),

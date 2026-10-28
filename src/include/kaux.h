@@ -34,7 +34,7 @@
 #endif
 
 #define KAUX_FAMILY_NAME "tosya"
-#define KAUX_FAMILY_VERSION 6u
+#define KAUX_FAMILY_VERSION 7u
 
 // One attribute carries the payload in either direction.
 enum {
@@ -52,6 +52,7 @@ enum {
 	KAUX_CMD_BATCH,
 	KAUX_CMD_END,
 	KAUX_CMD_STATUS,
+	KAUX_CMD_REFRESH, // resolve the protected directories again (a user was added)
 	__KAUX_CMD_MAX
 };
 #define KAUX_CMD_MAX (__KAUX_CMD_MAX - 1)
@@ -59,13 +60,14 @@ enum {
 // What a stream is carrying. Both kinds may be uploaded in the same session.
 #define KAUX_KIND_POLICY 0u
 #define KAUX_KIND_APKS 1u
-/* The packages that are hidden, by name, for the cleanup that runs inside the zygote after a
- * fork. Names travel in the clear because they never leave kernel memory: nothing an app can
- * read holds them, so there is nothing for a hash to protect against here. */
+/* The package names a caller may not see under the data directories. A stream is the whole set:
+ * ADD records only, and END replaces what the kernel holds. Names travel in the clear because
+ * they never leave kernel memory: nothing an app can read holds them. */
+#define KAUX_KIND_NAMES 5u
 /* Sixteen bytes: the name both halves use for their exchange, worked out from an installation's
  * own secret. It travels here so that the half that has no way to read the secret can still know it. */
 #define KAUX_KIND_TOKEN 4u
-#define KAUX_KIND_MAX KAUX_KIND_TOKEN
+#define KAUX_KIND_MAX KAUX_KIND_NAMES
 
 // What a record does. Added to a set or taken out of it.
 #define KAUX_OP_ADD 0u
@@ -105,6 +107,15 @@ struct kaux_policy_rec {
 };
 #define KAUX_POLICY_REC_WORDS 4u
 
+/* One hidden name: who may not see it (0 = every caller, otherwise an app uid), and the bytes
+ * that follow this head, zero padded to a four byte boundary. */
+struct kaux_name_rec {
+	unsigned int op; // KAUX_OP_ADD
+	unsigned int caller;
+	unsigned int name_len;
+};
+#define KAUX_NAME_REC_WORDS 3u
+
 /* What the module is doing, for the userspace half to show a user. Fixed size, so a
  * mismatch between the two ends is a checked error and not a misread. */
 struct kaux_status {
@@ -131,6 +142,13 @@ struct kaux_status {
 	int last_error; // the most recent failure, 0 when there is none
 	unsigned int apk_updates; // how many times a stream was ended
 	/*
+	 * The directory guard: how many parent directories have ->lookup replaced, how many names
+	 * the last set carried, and how many of its records the kernel refused.
+	 */
+	unsigned int hidden_names;
+	unsigned int hidden_guards;
+	unsigned int hidden_failed;
+	/*
 	 * The geometry this module was built for. The userspace half reads the
 	 * running kernel's config (/proc/config.gz, which GKI ships) and compares: a device
 	 * whose VA size differs puts the fixmap slot somewhere else, which the
@@ -152,6 +170,8 @@ struct kaux_status {
 #define KAUX_F_SETUID 0x4u
 // the last stream left every entry in place
 #define KAUX_F_APKS 0x8u
+// the directory guard is protecting at least one parent
+#define KAUX_F_HIDDEN 0x10u
 
 KAUX_STATIC_ASSERT(sizeof(struct kaux_begin) == 4,
 		   "kaux_begin is the wire image");
@@ -161,5 +181,7 @@ KAUX_STATIC_ASSERT(sizeof(struct kaux_apk_rec) == 24,
 		   "kaux_apk_rec is the wire image");
 KAUX_STATIC_ASSERT(sizeof(struct kaux_policy_rec) == 16,
 		   "kaux_policy_rec is the wire image");
+KAUX_STATIC_ASSERT(sizeof(struct kaux_name_rec) == 12,
+		   "kaux_name_rec is the wire image");
 
 #endif

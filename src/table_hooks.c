@@ -77,7 +77,7 @@ static struct hook_entry g_cset[];
 
 static tosya_syscall_t *find_slot(tosya_syscall_t *table, struct hook_entry *e)
 {
-	/* tosya_lookup() gives the spelling a table holds -- the jump-table entry
+	/* tosya_sym() gives the spelling a table holds -- the jump-table entry
 	 * before 6.1 and the plain symbol from there on; the other spelling is accepted
 	 * too.
 	 *
@@ -102,7 +102,7 @@ static tosya_syscall_t *find_slot(tosya_syscall_t *table, struct hook_entry *e)
 		want[nwant++] = (unsigned long)e->ally->orig;
 	}
 	if (e->sym) {
-		want[nwant++] = tosya_lookup(e->sym);
+		want[nwant++] = tosya_sym(e->sym);
 		want[nwant++] = tosya_lookup_raw(e->sym);
 	}
 	if (e->sym32) {
@@ -113,10 +113,10 @@ static tosya_syscall_t *find_slot(tosya_syscall_t *table, struct hook_entry *e)
 		const char *pfx = strstr(e->sym32, "__arm64_");
 		const char *alt = pfx ? pfx + strlen("__arm64_") : NULL;
 
-		want[nwant++] = tosya_lookup(e->sym32);
+		want[nwant++] = tosya_sym(e->sym32);
 		want[nwant++] = tosya_lookup_raw(e->sym32);
 		if (alt) {
-			want[nwant++] = tosya_lookup(alt);
+			want[nwant++] = tosya_sym(alt);
 			want[nwant++] = tosya_lookup_raw(alt);
 		}
 	}
@@ -409,7 +409,7 @@ asmlinkage long tosya32_setresgid(const struct pt_regs *regs)
 }
 static int uid_tables_install(void)
 {
-	unsigned long table = tosya_lookup("sys_call_table");
+	unsigned long table = tosya_sym("sys_call_table");
 	unsigned int n, n_compat = 0;
 
 	if (!table)
@@ -418,7 +418,7 @@ static int uid_tables_install(void)
 	 * devices. */
 	if (TOSYA_DEBUG_ON())
 		pr_info("tosya: sys_call_table=%px locator check: find_user=%px linked=%px\n",
-			(void *)table, (void *)tosya_lookup("find_user"),
+			(void *)table, (void *)tosya_sym("find_user"),
 			(void *)find_user);
 
 	tosya_status_set_hooks_expected(ARRAY_SIZE(g_hook),
@@ -439,7 +439,7 @@ static int uid_tables_install(void)
 	tosya_status_set_hooks(n, 0);
 
 #ifdef CONFIG_COMPAT
-	table = tosya_lookup("compat_sys_call_table");
+	table = tosya_sym("compat_sys_call_table");
 	if (table) {
 		g_uid_ctable = (tosya_syscall_t *)table;
 		n_compat = patch_entries(g_uid_ctable, g_chook,
@@ -470,7 +470,7 @@ static void uid_tables_remove(void)
 }
 static int setuid_tables_install(void)
 {
-	unsigned long table = tosya_lookup("sys_call_table");
+	unsigned long table = tosya_sym("sys_call_table");
 	unsigned int n, c = 0;
 
 	if (!table)
@@ -487,7 +487,7 @@ static int setuid_tables_install(void)
 		n);
 
 #ifdef CONFIG_COMPAT
-	table = tosya_lookup("compat_sys_call_table");
+	table = tosya_sym("compat_sys_call_table");
 	if (table) {
 		g_set_ctable = (tosya_syscall_t *)table;
 		c = patch_entries(g_set_ctable, g_cset, ARRAY_SIZE(g_cset),

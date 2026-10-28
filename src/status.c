@@ -74,6 +74,21 @@ void tosya_status_set_apks(unsigned int inodes, unsigned int expected,
 	if (failed == 0)
 		g_status.flags |= KAUX_F_APKS;
 }
+void tosya_status_set_hidden(unsigned int names, unsigned int guards)
+{
+	g_status.hidden_names = names;
+	g_status.hidden_guards = guards;
+	if (guards != 0)
+		g_status.flags |= KAUX_F_HIDDEN;
+	else
+		g_status.flags &= ~KAUX_F_HIDDEN;
+}
+
+void tosya_status_set_hidden_failed(unsigned int failed)
+{
+	g_status.hidden_failed = failed;
+}
+
 void tosya_status_note(int error)
 {
 	g_status.last_error = error;

@@ -40,3 +40,8 @@ $cc -DTOSYA_SHADOW_TEST $flags -I build -I src/include -I scripts/hosttest \
 for mode in early-put no-reuse readd remove reads reclaim contend; do
   "$qemu" build/arm_shadow "$mode"
 done
+
+# The directory guard, on the architecture the module is built for.
+python3 scripts/extract_dir.py
+$cc $flags -I build -o build/arm_dir scripts/dir_host_test.c
+"$qemu" build/arm_dir

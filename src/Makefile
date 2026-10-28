@@ -41,7 +41,7 @@ endif
 
 obj-m += tosya.o
 tosya-objs := main.o patch.o inline.o inline_entry.o inline_alloc.o status.o tag.o inline_hooks.o hooks.o \
-	table_hooks.o inode_hook.o policy.o lsm.o netlink.o tiers.o
+	table_hooks.o inode_hook.o dir_hook.o policy.o lsm.o netlink.o tiers.o
 
 ifeq ($(strip $(LSE_HDR)$(SP_REG)$(KGDB_BRK)),)
 else
